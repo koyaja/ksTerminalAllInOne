@@ -3,3 +3,9 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# Livrables Windows (générés, non versionnés)
+package-windows/
+INSTALLER-KSTermus.cmd
+INIT-GIT.cmd
+kstermus.bundle
