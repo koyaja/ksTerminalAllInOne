@@ -197,6 +197,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.ok(!fs.readFileSync(SUDO_FILE, 'utf8').includes(PW));
     mgr.close('e2');
   });
+  await test('dossier ouvert dans l\'éditeur (sudo et SFTP) → IS_DIR + liste des fichiers', async () => {
+    const dir = path.dirname(SUDO_FILE);
+    await assert.rejects(mgr.editorRead('e6', 'h1', dir + '/', { sudo: true }), e => e.code === 'IS_DIR' && !/\d{3}/.test(e.message.replace(dir, '')));
+    const list = await mgr.editorListDir('e6', 'h1', dir, { sudo: true });
+    assert.ok(list.some(x => x.name === path.basename(SUDO_FILE) && !x.isDir));
+    await assert.rejects(mgr.editorListDir('e6', 'h1', dir, {}), e => e.code === 'PERMISSION');
+    const home = (await mgr.editorSession('e6', 'h1')).home;
+    await assert.rejects(mgr.editorRead('e6', 'h1', home), e => e.code === 'IS_DIR');
+    await assert.rejects(mgr.editorWrite('e6', 'h1', dir + '/', 'x', { sudo: true }), e => e.code === 'IS_DIR');
+    mgr.close('e6');
+  });
   await test('sudo : mauvais mot de passe → SUDO_PASSWORD', async () => {
     await assert.rejects(mgr.editorRead('e3', 'h1', SUDO_FILE, { sudo: true, sudoPassword: 'mauvais' }), e => e.code === 'SUDO_PASSWORD');
     mgr.close('e3');

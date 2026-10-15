@@ -3,6 +3,12 @@
 (() => {
   const api = window.kst;
 
+  // replaceChildren / append ignorent les valeurs vides (null, undefined, false) : pas de « null » affiché.
+  for (const m of ['replaceChildren', 'append', 'prepend']) {
+    const orig = Element.prototype[m];
+    Element.prototype[m] = function (...kids) { return orig.apply(this, kids.flat(Infinity).filter(k => k !== null && k !== undefined && k !== false)); };
+  }
+
   // ---------- Utilitaires DOM (jamais d'innerHTML avec des données) ----------
   function h(tag, attrs = {}, ...children) {
     const el = document.createElement(tag);
@@ -1644,6 +1650,67 @@
     };
     const sudoOpts = () => ({ sudo: t.sudo, sudoPassword: t.sudoPassword || undefined, rememberSudo: !!t.rememberSudo });
 
+    function setPath(p) {
+      t.path = p;
+      t.title = p.replace(/\/+$/, '').split('/').pop() || p;
+      el.querySelector('.editor-name').textContent = t.title;
+      pathEl.textContent = `${host.label}:${p}`;
+      pathEl.title = p;
+      renderTabs();
+    }
+
+    // Sélecteur de fichier dans un dossier (SFTP, ou ls via sudo si le dossier est protégé).
+    async function showDirPicker(dir) {
+      setStatus(t, 'wait');
+      overlay(wrap, [h('div', { class: 'spinner' }), h('div', { text: `Lecture du dossier ${dir}${t.sudo ? ' (sudo)' : ''}…` })]);
+      let list;
+      try {
+        list = await withSudo(() => api.invoke('editor:listDir', id, hostId, dir, sudoOpts()));
+      } catch (e) {
+        const msg = e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+        if (/Permission refusée/.test(msg) && !t.sudo) { t.sudo = true; sudoBadge.hidden = false; return showDirPicker(dir); }
+        setStatus(t, 'off');
+        overlay(wrap, [h('div', { style: { fontWeight: 600 }, text: 'Impossible de lire le dossier' }), h('div', { class: 'muted', text: msg }),
+          h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => closeTab(id) }, 'Fermer'))]);
+        return;
+      }
+      setStatus(t, 'off');
+      setPath(dir.replace(/\/?$/, '/'));
+      const join = (n) => (dir === '/' ? '' : dir.replace(/\/+$/, '')) + '/' + n;
+      const open = (p) => { t.rawPath = p; setPath(p); load(false); };
+      const filter = h('input', { class: 'picker-filter', placeholder: 'Filtrer…' });
+      const newName = h('input', { placeholder: 'nouveau-fichier.conf' });
+      const listEl = h('div', { class: 'picker-list' });
+      const render = () => {
+        const q = filter.value.toLowerCase();
+        const items = list.filter(x => !q || x.name.toLowerCase().includes(q));
+        listEl.replaceChildren(...[
+          dir !== '/' ? h('button', { class: 'picker-item dir', onclick: () => showDirPicker(dir.replace(/\/[^/]+\/?$/, '') || '/') }, '📁 ..') : null,
+          ...items.map(x => h('button', { class: 'picker-item' + (x.isDir ? ' dir' : ''), title: join(x.name),
+            onclick: () => x.isDir ? showDirPicker(join(x.name)) : open(join(x.name)) }, (x.isDir ? '📁 ' : '📄 ') + x.name)),
+          !items.length ? h('div', { class: 'muted small', style: { padding: '10px' }, text: 'Dossier vide' }) : null].flat().filter(Boolean));
+      };
+      filter.addEventListener('input', render);
+      filter.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const q = filter.value.toLowerCase();
+        const first = list.find(x => !q || x.name.toLowerCase().includes(q));
+        if (first) first.isDir ? showDirPicker(join(first.name)) : open(join(first.name));
+      });
+      newName.addEventListener('keydown', (e) => { if (e.key === 'Enter' && newName.value.trim()) open(join(newName.value.trim())); });
+      render();
+      overlay(wrap, [
+        h('div', { class: 'picker-head' }, h('strong', { text: `📁 ${dir}` }), t.sudo ? h('span', { class: 'badge R', text: 'sudo' }) : null),
+        h('div', { class: 'muted small', text: 'C\'est un dossier : choisis le fichier à éditer, ou crée-en un.' }),
+        filter, listEl,
+        h('div', { class: 'picker-new' }, newName, h('button', { class: 'btn primary sm', onclick: () => newName.value.trim() && open(join(newName.value.trim())) }, '+ Créer')),
+        h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => closeTab(id) }, 'Fermer'))
+      ]);
+      const card = wrap.querySelector(':scope > .overlay .overlay-card');
+      if (card) card.classList.add('picker');
+      setTimeout(() => filter.focus(), 30);
+    }
+
     async function load(isReload) {
       setStatus(t, 'wait');
       overlay(wrap, [h('div', { class: 'spinner' }), h('div', { text: `${isReload ? 'Rechargement' : 'Ouverture'} de ${t.path}${t.sudo ? ' (sudo)' : ''}…` })]);
@@ -1652,16 +1719,15 @@
         if (!t.home) {
           const r = await api.invoke('editor:open', id, hostId);
           t.home = r.home;
-          t.path = resolveRemotePath(rawPath, t.home);
-          t.title = t.path.split('/').pop() || t.path;
-          el.querySelector('.editor-name').textContent = t.title;
-          pathEl.textContent = `${host.label}:${t.path}`;
-          pathEl.title = t.path;
+          setPath(resolveRemotePath(t.rawPath, t.home));
         }
+        // Chemin qui se termine par « / » : c'est un dossier → sélecteur de fichier.
+        if (/\/$/.test(t.path)) { await showDirPicker(t.path.replace(/\/+$/, '') || '/'); return; }
         let r;
         try {
           r = await withSudo(() => api.invoke('editor:read', id, hostId, t.path, { ...sudoOpts(), create: true }));
         } catch (e) {
+          if (/est un dossier/.test(e.message)) { await showDirPicker(t.path); return; }
           if (/Permission refusée/.test(e.message) && !t.sudo) {
             const ok = await confirmBox('Permission refusée', `Tu n'as pas le droit de lire ${t.path}. L'ouvrir en sudo ?`, 'Ouvrir en sudo');
             if (ok) { t.sudo = true; sudoBadge.hidden = false; return load(isReload); }
@@ -1700,7 +1766,7 @@
     }
 
     async function save(force) {
-      if (t.saving || t.status !== 'on') return;
+      if (t.saving || t.status !== 'on' || /\/$/.test(t.path)) return;
       t.saving = true;
       saveBtn.disabled = true; saveBtn.textContent = 'Enregistrement…';
       try {

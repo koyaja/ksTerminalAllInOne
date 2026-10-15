@@ -88,17 +88,21 @@ function installEditor(SshManager) {
     if (opts.sudo) {
       const pw = this.sudoPasswordFor(hostId, opts.sudoPassword);
       const { prefix, input } = await this.sudoPrefix(s, pw);
-      const r = await execCollect(s.conn, `${prefix} sh -c 'if [ -e "$1" ]; then stat -c %a -- "$1" >&2; cat -- "$1"; else echo __KST_NOFILE__ >&2; fi' sh ${q(remotePath)}`, input);
+      const r = await execCollect(s.conn, `${prefix} sh -c 'if [ -d "$1" ]; then echo __KST_ISDIR__ >&2; elif [ -e "$1" ]; then echo "__KST_MODE__$(stat -c %a -- "$1")" >&2; cat -- "$1"; else echo __KST_NOFILE__ >&2; fi' sh ${q(remotePath)}`, input);
       const se = sudoError(r.stderr); if (se) throw se;
+      const m = r.stderr.match(/__KST_MODE__(\d{3,4})/);
+      const errText = r.stderr.replace(/__KST_MODE__\d+\s*/g, '').trim();
+      if (/__KST_ISDIR__/.test(r.stderr)) throw codedError('IS_DIR', `${remotePath} est un dossier`);
+      if (!opts.create && /__KST_NOFILE__/.test(r.stderr)) throw codedError('NOT_FOUND', `${remotePath} n'existe pas`);
       if (/__KST_NOFILE__/.test(r.stderr)) { exists = false; buf = Buffer.alloc(0); }
-      else if (r.code !== 0) throw new Error(r.stderr.trim() || `Lecture impossible (code ${r.code})`);
-      else { buf = r.stdout; const m = r.stderr.match(/^(\d{3,4})\s*$/m); mode = m ? m[1] : null; }
+      else if (r.code !== 0) throw new Error(errText || `Lecture impossible (code ${r.code})`);
+      else { buf = r.stdout; mode = m ? m[1] : null; }
     } else {
       const { st, err } = await new Promise((res) => s.sftp.stat(remotePath, (e, a) => res({ st: e ? null : a, err: e })));
       if (err && (err.code === 3 || /permission denied/i.test(err.message))) throw codedError('PERMISSION', 'Permission refusée — ouvre ce fichier en sudo');
       if (!st) { if (!opts.create) throw codedError('NOT_FOUND', `${remotePath} n'existe pas`); exists = false; buf = Buffer.alloc(0); }
       else {
-        if ((st.mode & 0o170000) === 0o040000) throw new Error('C\'est un dossier');
+        if ((st.mode & 0o170000) === 0o040000) throw codedError('IS_DIR', `${remotePath} est un dossier`);
         if (st.size > MAX_SIZE) throw codedError('TOO_BIG', `Fichier trop volumineux pour l'éditeur (${(st.size / 1048576).toFixed(1)} Mo)`);
         mode = (st.mode & 0o7777).toString(8);
         buf = await new Promise((res, rej) => s.sftp.readFile(remotePath, (e, d) => {
@@ -114,8 +118,30 @@ function installEditor(SshManager) {
     return { content: text.replace(/\r\n/g, '\n'), hash: sha256(buf), eol, exists, mode, size: buf.length };
   };
 
+  // Liste un dossier (SFTP, ou `ls` via sudo) pour choisir le fichier à éditer.
+  P.editorListDir = async function (sessionId, hostId, dir, opts = {}) {
+    const s = await this.editorSession(sessionId, hostId);
+    let entries;
+    if (opts.sudo) {
+      const pw = this.sudoPasswordFor(hostId, opts.sudoPassword);
+      const { prefix, input } = await this.sudoPrefix(s, pw);
+      const r = await execCollect(s.conn, `${prefix} sh -c 'cd -- "$1" && ls -1Ap' sh ${q(dir)}`, input, 4 * 1024 * 1024);
+      const se = sudoError(r.stderr); if (se) throw se;
+      if (r.code !== 0) throw new Error(r.stderr.trim() || `Impossible de lister ${dir}`);
+      entries = r.stdout.toString('utf8').split('\n').filter(Boolean).map(l => ({ name: l.replace(/\/$/, ''), isDir: l.endsWith('/') }));
+    } else {
+      entries = await new Promise((res, rej) => s.sftp.readdir(dir, (e, list) => {
+        if (!e) return res(list.map(x => ({ name: x.filename, isDir: (x.attrs.mode & 0o170000) === 0o040000, size: x.attrs.size })));
+        if (e.code === 3 || /permission denied/i.test(e.message)) return rej(codedError('PERMISSION', 'Permission refusée — liste ce dossier en sudo'));
+        rej(new Error(`${dir} : ${e.message}`));
+      }));
+    }
+    return entries.filter(e => e.name !== '.' && e.name !== '..').sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name));
+  };
+
   // Écriture. expectedHash = empreinte lue à l'ouverture : si le fichier a changé entre-temps → CONFLICT.
   P.editorWrite = async function (sessionId, hostId, remotePath, content, opts = {}) {
+    if (/\/$/.test(remotePath)) throw codedError('IS_DIR', `${remotePath} est un dossier`);
     const s = await this.editorSession(sessionId, hostId);
     const text = opts.eol === 'crlf' ? content.replace(/\r?\n/g, '\r\n') : content;
     const buf = Buffer.from(text, 'utf8');
@@ -124,7 +150,7 @@ function installEditor(SshManager) {
     if (!opts.force && opts.expectedHash) {
       let current = null;
       try { current = await this.editorRead(sessionId, hostId, remotePath, { sudo: opts.sudo, sudoPassword: opts.sudoPassword, create: true }); }
-      catch (e) { if (e.code === 'SUDO_PASSWORD' || e.code === 'SUDO_DENIED') throw e; }
+      catch (e) { if (['SUDO_PASSWORD', 'SUDO_DENIED', 'IS_DIR'].includes(e.code)) throw e; }
       if (current && current.exists && current.hash !== opts.expectedHash) {
         throw codedError('CONFLICT', 'Le fichier a été modifié sur le serveur depuis son ouverture');
       }

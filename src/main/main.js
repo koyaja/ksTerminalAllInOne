@@ -346,6 +346,7 @@ handle('editor:write', async (sessionId, hostId, remotePath, content, opts = {})
   return r;
 });
 handle('editor:open', async (sessionId, hostId) => { const s = await manager.editorSession(sessionId, hostId); return { home: s.home }; });
+handle('editor:listDir', (sessionId, hostId, dir, opts = {}) => manager.editorListDir(sessionId, hostId, dir, opts));
 handle('editor:close', (sessionId) => { manager.close(sessionId); return true; });
 handle('history:list', (hostId, remotePath) => vault.readHistory(historyKey(hostId, remotePath)).map(({ content, ...v }) => v).reverse());
 handle('history:get', (hostId, remotePath, id) => {

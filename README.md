@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.2.0**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.2.1**
 
 ---
 
@@ -180,6 +180,7 @@ Fonctionnement :
 - **Conflits** : à l'enregistrement, KSTermus vérifie que le fichier n'a pas changé sur le serveur depuis son ouverture (empreinte SHA-256). En cas de conflit, tu peux annuler, **voir les différences** ou **écraser**.
 - **Permission refusée** : KSTermus propose de rouvrir ou d'enregistrer **en sudo**.
 - Un fichier inexistant est créé au premier enregistrement.
+- Un **dossier** (chemin terminé par `/`, ou dossier existant) ouvre un **sélecteur de fichiers** : filtre, navigation, `..`, et création d'un nouveau fichier. En sudo si le dossier est protégé.
 - Fichiers binaires et fichiers de plus de 8 Mo refusés.
 
 **Comment fonctionne le mode sudo**
@@ -327,11 +328,11 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-27 tests couvrent :
+28 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
-- **l'éditeur** : CRLF, conflit, permission refusée, sudo avec mot de passe, sudo NOPASSWD, mauvais mot de passe, droits et propriétaire conservés, mot de passe jamais écrit dans le fichier, fichier binaire refusé ;
+- **l'éditeur** : CRLF, conflit, permission refusée, dossier ouvert par erreur (sélecteur), sudo avec mot de passe, sudo NOPASSWD, mauvais mot de passe, droits et propriétaire conservés, mot de passe jamais écrit dans le fichier, fichier binaire refusé ;
 - **l'historique** : chiffrement et re-chiffrement ;
 - **les tunnels** : -L, -R, SOCKS5, port déjà occupé ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer.
@@ -371,6 +372,7 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 
 | Version | Contenu |
 |---|---|
+| **1.2.1** | Éditeur : ouvrir un dossier (ex. `/opt/app/`) affiche un sélecteur de fichiers (SFTP ou sudo) avec création de fichier au lieu d'une erreur ; message d'erreur sudo nettoyé |
 | **1.2.0** | Terminaux locaux (PowerShell, cmd, WSL, Git Bash), panneaux mixtes local + SSH, préfixe tmux, sessions détachables, espaces de travail, palette de commandes, blocs de commandes, snippets paramétrés, éditeur distant (normal et sudo) avec conflits et CRLF, historique chiffré des éditions, afficher / copier les mots de passe |
 | **1.1.0** | Icône intégrée au .exe, split de l'espace de travail, diffusion de la saisie, zoom de panneau, barre de titre intégrée, mémorisation de la fenêtre, instance unique, confirmation à la fermeture |
 | **1.0.0** | Première version : hosts, keychain chiffré, terminal SSH, SFTP, snippets, port forwarding, known hosts |
