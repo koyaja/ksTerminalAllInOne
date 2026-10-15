@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>KSTermus</title>
+  <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="../../node_modules/codemirror/lib/codemirror.css">
+  <link rel="stylesheet" href="../../node_modules/codemirror/addon/dialog/dialog.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Écran de verrouillage -->
+  <section id="lock" class="lock" hidden>
+    <div class="drag-strip"><span class="brand small-brand"><img src="../../assets/icon.png" alt=""> KSTermus</span></div>
+    <form id="lock-form" class="lock-card" autocomplete="off">
+      <div class="brand big"><img class="brand-logo" src="../../assets/icon.png" alt=""> KSTermus</div>
+      <p id="lock-hint" class="muted"></p>
+      <label class="field"><span>Mot de passe maître</span><input id="lock-pw" type="password" required minlength="8" autofocus></label>
+      <label class="field" id="lock-pw2-wrap" hidden><span>Confirmer</span><input id="lock-pw2" type="password" minlength="8"></label>
+      <p id="lock-error" class="error" hidden></p>
+      <button id="lock-btn" class="btn primary wide" type="submit">Déverrouiller</button>
+      <p class="muted small">Les hosts, mots de passe et clés sont chiffrés (AES-256-GCM + scrypt). Sans ce mot de passe, rien n'est récupérable.</p>
+    </form>
+  </section>
+
+  <!-- Application -->
+  <section id="app" class="app" hidden>
+    <header class="tabbar">
+      <div class="brand"><img class="brand-logo" src="../../assets/icon.png" alt=""></div>
+      <nav id="tabs" class="tabs"></nav>
+      <div class="drag-fill"></div>
+      <button id="btn-lock" class="icon-btn no-drag" title="Verrouiller le coffre">🔒</button>
+    </header>
+
+    <div id="home" class="home">
+      <aside class="sidebar">
+        <button class="nav-item active" data-section="hosts"><span>🖥</span>Hosts</button>
+        <button class="nav-item" data-section="local"><span>❯</span>Local</button>
+        <button class="nav-item" data-section="keychain"><span>🔑</span>Keychain</button>
+        <button class="nav-item" data-section="snippets"><span>⚡</span>Snippets</button>
+        <button class="nav-item" data-section="forwards"><span>⇄</span>Port forwarding</button>
+        <button class="nav-item" data-section="history"><span>🕘</span>Historique</button>
+        <button class="nav-item" data-section="known"><span>🛡</span>Known hosts</button>
+        <div class="sidebar-spacer"></div>
+        <button class="nav-item" data-section="settings"><span>⚙</span>Paramètres</button>
+        <div id="app-version" class="version"></div>
+      </aside>
+      <main id="section" class="section"></main>
+    </div>
+
+    <div id="sessions" class="sessions"></div>
+  </section>
+
+  <div id="modal-root"></div>
+  <div id="toasts" class="toasts"></div>
+  <div id="prefix-badge" class="prefix-badge"></div>
+
+  <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <script src="../../node_modules/codemirror/lib/codemirror.js"></script>
+  <script src="../../node_modules/codemirror/addon/dialog/dialog.js"></script>
+  <script src="../../node_modules/codemirror/addon/search/searchcursor.js"></script>
+  <script src="../../node_modules/codemirror/addon/search/search.js"></script>
+  <script src="../../node_modules/codemirror/addon/search/jump-to-line.js"></script>
+  <script src="../../node_modules/codemirror/addon/edit/matchbrackets.js"></script>
+  <script src="../../node_modules/codemirror/addon/edit/closebrackets.js"></script>
+  <script src="../../node_modules/codemirror/addon/selection/active-line.js"></script>
+  <script src="../../node_modules/codemirror/addon/comment/comment.js"></script>
+  <script src="../../node_modules/codemirror/addon/mode/simple.js"></script>
+  <script src="../../node_modules/codemirror/addon/mode/overlay.js"></script>
+  <script src="../../node_modules/codemirror/addon/mode/multiplex.js"></script>
+  <script src="../../node_modules/codemirror/mode/javascript/javascript.js"></script>
+  <script src="../../node_modules/codemirror/mode/xml/xml.js"></script>
+  <script src="../../node_modules/codemirror/mode/htmlmixed/htmlmixed.js"></script>
+  <script src="../../node_modules/codemirror/mode/css/css.js"></script>
+  <script src="../../node_modules/codemirror/mode/python/python.js"></script>
+  <script src="../../node_modules/codemirror/mode/shell/shell.js"></script>
+  <script src="../../node_modules/codemirror/mode/yaml/yaml.js"></script>
+  <script src="../../node_modules/codemirror/mode/nginx/nginx.js"></script>
+  <script src="../../node_modules/codemirror/mode/sql/sql.js"></script>
+  <script src="../../node_modules/codemirror/mode/properties/properties.js"></script>
+  <script src="../../node_modules/codemirror/mode/dockerfile/dockerfile.js"></script>
+  <script src="../../node_modules/codemirror/mode/markdown/markdown.js"></script>
+  <script src="../../node_modules/codemirror/mode/php/php.js"></script>
+  <script src="../../node_modules/codemirror/mode/clike/clike.js"></script>
+  <script src="../../node_modules/codemirror/mode/toml/toml.js"></script>
+  <script src="../../node_modules/codemirror/mode/go/go.js"></script>
+  <script src="../../node_modules/codemirror/mode/lua/lua.js"></script>
+  <script src="../../node_modules/codemirror/mode/ruby/ruby.js"></script>
+  <script src="../../node_modules/codemirror/mode/perl/perl.js"></script>
+  <script src="../../node_modules/codemirror/mode/rust/rust.js"></script>
+  <script src="../../node_modules/codemirror/mode/powershell/powershell.js"></script>
+  <script src="../../node_modules/codemirror/mode/diff/diff.js"></script>
+  <script src="../../node_modules/codemirror/mode/jinja2/jinja2.js"></script>
+  <script src="../../node_modules/codemirror/mode/groovy/groovy.js"></script>
+  <script src="../../node_modules/codemirror/mode/vue/vue.js"></script>
+  <script src="../../node_modules/diff/dist/diff.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
