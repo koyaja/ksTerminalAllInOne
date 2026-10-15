@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.2.1**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.2.2**
 
 ---
 
@@ -41,7 +41,7 @@
 |---|---|
 | **Hosts** | Groupes, couleurs, recherche, duplication, commande au démarrage, import d'un fichier `~/.ssh/config` |
 | **Authentification** | Mot de passe, clé du keychain (avec passphrase), agent SSH (OpenSSH / Pageant), keyboard-interactive |
-| **Terminal SSH** | Onglets, reconnexion en un clic, copie à la sélection, liens cliquables, 10 000 lignes d'historique |
+| **Terminal SSH** | Onglets, reconnexion en un clic, copie à la sélection (une seule écriture, au relâchement de la souris), liens cliquables, 10 000 lignes d'historique |
 | **Terminal local** | PowerShell 7, Windows PowerShell, cmd, Git Bash, distributions WSL (détection automatique) ; bash/zsh/fish sous Linux/macOS |
 | **Split** | Jusqu'à 8 panneaux par onglet, **mélange local + SSH**, séparateurs déplaçables, zoom d'un panneau, diffusion de la saisie |
 | **tmux** | Préfixe `Ctrl+B` (ou `Ctrl+A`), 20 commandes, sessions locales **détachables et rattachables**, espaces de travail sauvegardés |
@@ -235,6 +235,7 @@ La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la conne
 | `Ctrl+Shift+O` | Copier la sortie de la dernière commande |
 | `Ctrl+Tab`, `Ctrl+1…9` | Changer d'onglet |
 | `Ctrl+Shift+C` / `V` | Copier / coller dans le terminal (clic droit = coller) |
+| `Ctrl+C` (avec sélection) / `Ctrl+V` | Copier / coller façon Windows Terminal — sans sélection, `Ctrl+C` envoie bien ^C au shell |
 | `Ctrl+S` | Enregistrer le fichier (éditeur) |
 | `Ctrl +` / `Ctrl −` / `Ctrl 0` | Taille du texte |
 | `F11` | Plein écran |
@@ -372,6 +373,7 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 
 | Version | Contenu |
 |---|---|
+| **1.2.2** | Presse-papiers : plus de double collage (Ctrl+Shift+V / Ctrl+V), une seule copie par sélection (plus de doublons dans Win+V), Ctrl+C copie si du texte est sélectionné, Ctrl+V colle sous Windows |
 | **1.2.1** | Éditeur : ouvrir un dossier (ex. `/opt/app/`) affiche un sélecteur de fichiers (SFTP ou sudo) avec création de fichier au lieu d'une erreur ; message d'erreur sudo nettoyé |
 | **1.2.0** | Terminaux locaux (PowerShell, cmd, WSL, Git Bash), panneaux mixtes local + SSH, préfixe tmux, sessions détachables, espaces de travail, palette de commandes, blocs de commandes, snippets paramétrés, éditeur distant (normal et sudo) avec conflits et CRLF, historique chiffré des éditions, afficher / copier les mots de passe |
 | **1.1.0** | Icône intégrée au .exe, split de l'espace de travail, diffusion de la saisie, zoom de panneau, barre de titre intégrée, mémorisation de la fenêtre, instance unique, confirmation à la fermeture |

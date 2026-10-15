@@ -37,6 +37,16 @@
     $('#toasts').append(t);
     setTimeout(() => t.remove(), isErr ? 7000 : 3500);
   }
+  // Copie unique : n'écrit pas deux fois de suite le même texte (évite les doublons dans Win+V).
+  let lastCopy = { text: null, at: 0 };
+  function copyText(text) {
+    if (!text) return;
+    const now = Date.now();
+    if (text === lastCopy.text && now - lastCopy.at < 1500) return;
+    lastCopy = { text, at: now };
+    api.invoke('clipboard:write', text);
+  }
+
   async function guard(fn) {
     try { return await fn(); } catch (e) { toast(e.message || String(e), true); return undefined; }
   }
@@ -972,16 +982,28 @@
       if (isLocal) { titleEl.textContent = title.length > 60 ? '…' + title.slice(-58) : title; api.invoke('local:title', id, title).catch(() => {}); }
       if (t.activePane === id) { updateBar(t); renderTabs(); }
     });
-    term.onSelectionChange(() => { const s = term.getSelection(); if (s) api.invoke('clipboard:write', s); });
+    // Presse-papiers — une seule écriture / un seul collage par action :
+    //  · sélection à la souris : copiée UNE fois, au relâchement du bouton (pas à chaque mouvement) ;
+    //  · Ctrl+Shift+C : copie (ignorée si ce texte vient déjà d'être copié) ;
+    //  · Ctrl+C avec une sélection : copie native (comme Windows Terminal), sinon ^C part au shell ;
+    //  · Ctrl+Shift+V (et Ctrl+V en local sous Windows) : collage NATIF du navigateur uniquement,
+    //    géré par xterm (bracketed paste) — on ne recolle pas à la main, d'où l'ancien doublon ;
+    //  · clic droit : colle via term.paste().
+    termHost.addEventListener('mouseup', () => setTimeout(() => { if (term.hasSelection()) copyText(term.getSelection()); }, 0));
     term.attachCustomKeyEventHandler(ev => {
       if (ev.type !== 'keydown') return true;
-      if (ev.ctrlKey && ev.shiftKey && ev.code === 'KeyC') { const s = term.getSelection(); if (s) api.invoke('clipboard:write', s); return false; }
-      if (ev.ctrlKey && ev.shiftKey && ev.code === 'KeyV') { api.invoke('clipboard:read').then(x => x && writeInput(x)); return false; }
-      // Ctrl+V « à la Windows » dans les terminaux locaux
-      if (isLocal && ev.ctrlKey && !ev.shiftKey && ev.code === 'KeyV' && api.platform === 'win32') { api.invoke('clipboard:read').then(x => x && writeInput(x)); return false; }
+      if (ev.ctrlKey && ev.shiftKey && ev.code === 'KeyC') { if (term.hasSelection()) copyText(term.getSelection()); return false; }
+      if (ev.ctrlKey && ev.shiftKey && ev.code === 'KeyV') return false; // laisse le collage natif
+      if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && ev.code === 'KeyC' && term.hasSelection()) {
+        copyText(term.getSelection());
+        setTimeout(() => term.clearSelection(), 0);
+        ev.preventDefault();
+        return false;
+      }
+      if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && ev.code === 'KeyV' && api.platform === 'win32') return false; // Ctrl+V colle sous Windows (collage natif)
       return true;
     });
-    termHost.addEventListener('contextmenu', (e) => { e.preventDefault(); api.invoke('clipboard:read').then(x => x && writeInput(x)); });
+    termHost.addEventListener('contextmenu', (e) => { e.preventDefault(); api.invoke('clipboard:read').then(x => { if (x && p.status === 'on') term.paste(x); }); });
     el.addEventListener('mousedown', () => setActivePane(t, id), true);
     term.textarea && term.textarea.addEventListener('focus', () => setActivePane(t, id));
 
