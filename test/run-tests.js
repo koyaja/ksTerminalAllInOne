@@ -475,6 +475,113 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.ok(PS_VERIFY.includes('ContentType=WindowsRuntime'));
   });
 
+  console.log('Mises à jour');
+  const { Updater, signManifest, verifyManifest, cmpVersion, SWAP_PS1, EXTRACT_PS1 } = require('../src/main/updater');
+  const crypto = require('crypto');
+  const kp = crypto.generateKeyPairSync('ed25519');
+  const PRIV = kp.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const PUB = kp.publicKey.export({ type: 'spki', format: 'pem' });
+  const zipBytes = crypto.randomBytes(300 * 1024);
+  const mk = (over = {}) => {
+    const m = { version: '9.1.0', file: 'KSTermus-win-x64-9.1.0.zip', size: zipBytes.length, sha256: crypto.createHash('sha256').update(zipBytes).digest('hex'), notes: 'Nouveautés\n- truc', date: '2026-10-16T00:00:00Z', ...over };
+    m.sig = signManifest(m, PRIV);
+    return m;
+  };
+  const feed = { manifest: mk(), zip: zipBytes, hits: 0 };
+  const upSrv = http.createServer((req, res) => {
+    feed.hits++;
+    const base = `http://127.0.0.1:${upSrv.address().port}`;
+    if (req.url === '/repos/x/y/releases/latest') {
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify({ html_url: base + '/rel', published_at: '2026-10-16T00:00:00Z', assets: [
+        { name: 'update.json', browser_download_url: base + '/dl/update.json' },
+        { name: feed.manifest.file, browser_download_url: base + '/dl/zip' }] }));
+    }
+    if (req.url === '/dl/update.json') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify(feed.manifest)); }
+    if (req.url === '/dl/zip') { res.setHeader('content-length', feed.zip.length); return res.end(feed.zip); }
+    res.statusCode = 404; res.end();
+  });
+  await new Promise(r => upSrv.listen(0, '127.0.0.1', r));
+  const FEED = `http://127.0.0.1:${upSrv.address().port}/repos/x/y/releases/latest`;
+  const mkUpd = (o = {}) => new Updater({ currentVersion: '9.0.0', feed: FEED, publicKey: PUB, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'kst-upd-')), platform: 'linux', ...o });
+
+  await test('versions : comparaison semver', async () => {
+    assert.strictEqual(cmpVersion('1.10.0', '1.9.9'), 1);
+    assert.strictEqual(cmpVersion('1.4.0', '1.4.0'), 0);
+    assert.strictEqual(cmpVersion('1.4.0', '1.5.0'), -1);
+  });
+  await test('mise à jour : détectée, téléchargée, SHA-256 vérifié', async () => {
+    const states = [];
+    const u = mkUpd({ emit: (c, s) => states.push(s.status) });
+    const st = await u.check();
+    assert.strictEqual(st.status, 'available'); assert.strictEqual(st.version, '9.1.0'); assert.ok(st.notes.includes('truc'));
+    assert.strictEqual(st.canInstall, false);
+    const d = await u.download();
+    assert.strictEqual(d.status, 'downloaded', d.error);
+    assert.ok(fs.readFileSync(d.file).equals(zipBytes));
+    assert.ok(states.includes('downloading'));
+  });
+  await test('mise à jour : même version ou version plus ancienne → rien', async () => {
+    assert.strictEqual((await mkUpd({ currentVersion: '9.1.0' }).check()).status, 'none');
+    assert.strictEqual((await mkUpd({ currentVersion: '10.0.0' }).check()).status, 'none', 'pas de retour en arrière');
+  });
+  await test('mise à jour : manifeste falsifié ou signé par une autre clé → refusée', async () => {
+    feed.manifest = { ...mk(), notes: 'notes modifiées après signature' };
+    let st = await mkUpd().check();
+    assert.strictEqual(st.status, 'error'); assert.match(st.error, /Signature/);
+    const other = crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' });
+    const m = mk(); m.sig = signManifest(m, other); feed.manifest = m;
+    st = await mkUpd().check();
+    assert.match(st.error, /Signature/);
+    assert.throws(() => verifyManifest({ ...mk(), file: '../../evil.zip' }, PUB), /Nom de fichier/);
+    feed.manifest = mk();
+  });
+  await test('mise à jour : archive modifiée (SHA-256 différent) → rejetée et supprimée', async () => {
+    const good = feed.zip;
+    feed.zip = Buffer.from(good); feed.zip[100] ^= 0xff;
+    const u = mkUpd();
+    await u.check();
+    const d = await u.download();
+    assert.strictEqual(d.status, 'error'); assert.match(d.error, /SHA-256/);
+    assert.deepStrictEqual(fs.readdirSync(u.dir).filter(f => f.includes('.zip')), [], 'aucun fichier laissé');
+    feed.zip = Buffer.concat([good, Buffer.from('x')]);
+    const u2 = mkUpd(); await u2.check();
+    assert.match((await u2.download()).error, /plus grande/);
+    feed.zip = good;
+  });
+  await test('mise à jour Windows : extraction, puis remplacement détaché avec relance', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-app-'));
+    const appDir = path.join(base, 'KSTermus');
+    fs.mkdirSync(appDir);
+    const psCalls = [], spawned = [];
+    const u = mkUpd({
+      platform: 'win32', isPackaged: true, appDir,
+      runPs: async (script, env) => { psCalls.push(script); fs.mkdirSync(path.join(env.KST_UPD_STAGE, 'KSTermus'), { recursive: true }); fs.writeFileSync(path.join(env.KST_UPD_STAGE, 'KSTermus', 'KSTermus.exe'), 'v9.1'); return 'OK'; },
+      spawnDetached: (script, env) => spawned.push({ script, env })
+    });
+    assert.throws(() => u.apply({ relaunch: true }), /Aucune mise à jour prête/);
+    await u.check();
+    const d = await u.download();
+    assert.strictEqual(d.status, 'ready', d.error);
+    assert.strictEqual(psCalls[0], EXTRACT_PS1);
+    assert.strictEqual(fs.readFileSync(path.join(appDir + '.new', 'KSTermus.exe'), 'utf8'), 'v9.1');
+    assert.ok(!fs.existsSync(appDir + '.stage'));
+    u.apply({ relaunch: true, pid: 4242 });
+    assert.strictEqual(spawned[0].script, SWAP_PS1);
+    assert.strictEqual(spawned[0].env.KST_UPD_PID, '4242');
+    assert.strictEqual(spawned[0].env.KST_UPD_APP, appDir);
+    assert.strictEqual(spawned[0].env.KST_UPD_RELAUNCH, '1');
+    assert.strictEqual(u.state.status, 'installing');
+    assert.ok(SWAP_PS1.includes('Rename-Item -Path $old'), 'retour arrière prévu');
+  });
+  await test('mise à jour : release sans update.json ou feed injoignable → pas de plantage', async () => {
+    const u = mkUpd({ feed: FEED.replace('releases/latest', 'nope') });
+    assert.strictEqual((await u.check()).status, 'none');
+    const u2 = mkUpd({ feed: 'http://127.0.0.1:1/x' });
+    assert.strictEqual((await u2.check()).status, 'error');
+  });
+  upSrv.close();
+
   mgr.closeAll();
   srv.close();
   console.log(`\n${pass} réussi(s), ${failN} échec(s)`);

@@ -9,3 +9,5 @@ package-windows/
 INSTALLER-KSTermus.cmd
 INIT-GIT.cmd
 kstermus.bundle
+*.pem
+signing/

@@ -294,6 +294,90 @@
     } }
   ]);
 
+  // ---------- Mises à jour ----------
+  let U = { status: 'idle' };
+  let updNotified = '';
+  function fmtMB(n) { return n ? (n / 1048576).toFixed(0) + ' Mo' : ''; }
+  function renderUpdatePill() {
+    const pill = $('#update-pill');
+    const st = U.status;
+    pill.className = 'update-pill no-drag';
+    pill.hidden = !['available', 'downloading', 'extracting', 'ready', 'downloaded'].includes(st);
+    if (st === 'available' || st === 'downloaded') { pill.textContent = `⬆ ${U.version} disponible`; pill.title = 'Voir la mise à jour'; }
+    else if (st === 'downloading') { pill.textContent = `⬇ ${U.version} · ${Math.round((U.progress || 0) * 100)} %`; pill.classList.add('busy'); pill.title = 'Téléchargement en arrière-plan'; }
+    else if (st === 'extracting') { pill.textContent = `⬇ ${U.version} · préparation…`; pill.classList.add('busy'); }
+    else if (st === 'ready') { pill.textContent = `⟳ Redémarrer pour ${U.version}`; pill.classList.add('ready'); pill.title = 'Mise à jour prête — sinon installée à la fermeture'; }
+    const modalBar = document.querySelector('.update-bar > i');
+    if (modalBar) modalBar.style.width = Math.round((U.progress || 0) * 100) + '%';
+  }
+  api.on('update:state', (st) => {
+    const prev = U.status;
+    U = st;
+    renderUpdatePill();
+    if (ui.section === 'settings' && ui.activeTab === 'home' && $('#upd-status')) $('#upd-status').textContent = updateStatusText();
+    if ((st.status === 'available' || st.status === 'ready' || st.status === 'downloaded') && updNotified !== st.status + st.version && prev !== st.status && S) {
+      updNotified = st.status + st.version;
+      toast(st.status === 'ready' ? `KSTermus ${st.version} est prête — clique sur « Redémarrer »` : `KSTermus ${st.version} est disponible`);
+    }
+  });
+  api.invoke('update:state').then(st => { U = st; renderUpdatePill(); }).catch(() => {});
+  $('#update-pill').onclick = () => showUpdateModal();
+
+  function updateStatusText() {
+    switch (U.status) {
+      case 'checking': return 'Vérification…';
+      case 'none': return `À jour (v${U.current})` + (U.checkedAt ? ' — vérifié à ' + new Date(U.checkedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '');
+      case 'available': return `Version ${U.version} disponible`;
+      case 'downloading': return `Téléchargement de ${U.version} : ${Math.round((U.progress || 0) * 100)} %`;
+      case 'extracting': return `Préparation de ${U.version}…`;
+      case 'ready': return `${U.version} prête : redémarre, ou elle s'installera à la fermeture`;
+      case 'downloaded': return `${U.version} téléchargée — installe-la avec INSTALLER-KSTermus.cmd`;
+      case 'installing': return 'Installation…';
+      case 'error': return 'Erreur : ' + U.error;
+      default: return `v${U.current || ''}`;
+    }
+  }
+
+  async function showUpdateModal() {
+    const st = U;
+    const sessions = [...tabs.values()].filter(t => t.kind !== 'edit').length;
+    const body = [
+      h('div', { class: 'update-meta' },
+        h('span', { text: `Actuelle : v${st.current}` }), h('span', { text: `Nouvelle : v${st.version}` }),
+        st.size ? h('span', { text: fmtMB(st.size) }) : null,
+        st.date ? h('span', { text: new Date(st.date).toLocaleDateString('fr-FR') }) : null),
+      st.notes ? h('pre', { class: 'update-notes', text: st.notes }) : h('p', { class: 'muted', text: 'Pas de notes de version.' }),
+      ['downloading', 'extracting'].includes(st.status) ? h('div', { class: 'update-bar' }, h('i', { style: { width: Math.round((st.progress || 0) * 100) + '%' } })) : null,
+      h('p', { class: 'muted small', text: 'Archive signée (Ed25519) et vérifiée (SHA-256) avant installation.' }),
+      st.status === 'ready' && sessions ? h('p', { class: 'small', style: { color: 'var(--warn)' }, text: `⚠ ${sessions} onglet(s) ouvert(s) seront fermés au redémarrage.` }) : null
+    ];
+    const actions = [{ label: 'Plus tard', value: null }, { label: 'Page de la release', value: 'page' }];
+    if (st.status === 'available') actions.push({ label: st.canInstall ? 'Télécharger et préparer' : 'Télécharger', class: 'primary', value: 'download' });
+    if (st.status === 'ready') actions.push({ label: 'Redémarrer maintenant', class: 'primary', value: 'install' });
+    const r = await modal({ title: `KSTermus ${st.version}`, body, actions, wide: true });
+    if (r === 'page') api.invoke('update:openPage');
+    else if (r === 'download') { const s2 = await guard(() => api.invoke('update:download')); if (s2 && s2.status === 'error') toast(s2.error, true); }
+    else if (r === 'install') await guard(() => api.invoke('update:install'));
+  }
+
+  function updateRow() {
+    const status = h('div', { class: 'muted small', id: 'upd-status', text: updateStatusText() });
+    const auto = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' }, title: 'Vérifier et télécharger automatiquement' });
+    auto.checked = S.settings.autoUpdate !== false;
+    auto.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoUpdate: auto.checked })); if (s) S = s; });
+    const btn = h('button', { class: 'btn sm', onclick: async () => {
+      btn.disabled = true;
+      const st = await guard(() => api.invoke('update:check'));
+      btn.disabled = false;
+      if (st && st.status === 'available') showUpdateModal();
+      else if (st && st.status === 'none') toast('KSTermus est à jour');
+    } }, 'Vérifier');
+    return h('div', { class: 'row' },
+      h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Mises à jour automatiques' }),
+        h('div', { class: 'muted small', text: 'Depuis GitHub Releases, au démarrage puis toutes les 6 h. Téléchargement en arrière-plan ; jamais de redémarrage sans ton accord.' }), status),
+      h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center' } }, btn, auto));
+  }
+
   // ---------- Navigation ----------
   document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', () => {
     ui.section = b.dataset.section;
@@ -697,6 +781,7 @@
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Reconnexion automatique SSH' }), h('div', { class: 'muted small', text: 'Après une coupure réseau ou une mise en veille : nouvel essai à 2, 4, 8, 15 puis 30 s.' })),
           (() => { const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' } }); c.checked = S.settings.autoReconnect !== false;
             c.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoReconnect: c.checked })); if (s) S = s; }); return c; })()),
+        updateRow(),
         securityRows(),
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Recherche dans le terminal' }), h('div', { class: 'muted small', text: 'Ctrl+Shift+F ouvre toujours la recherche. Avec Ctrl+F, la touche n\'est plus envoyée au shell (avance d\'un caractère dans bash, page suivante dans vim/less).' })),
           (() => { const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' }, title: 'Ctrl+F ouvre aussi la recherche' }); c.checked = !!S.settings.ctrlFSearch;

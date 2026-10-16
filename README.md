@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.4.0**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.5.0**
 
 ---
 
@@ -25,6 +25,7 @@
    - [Known hosts](#known-hosts)
    - [Verrouillage et Windows Hello](#verrouillage-et-windows-hello)
    - [Recherche dans le terminal](#recherche-dans-le-terminal)
+   - [Mises à jour automatiques](#mises-à-jour-automatiques)
 5. [Raccourcis clavier](#raccourcis-clavier)
 6. [Sécurité](#sécurité)
 7. [Données et sauvegarde](#données-et-sauvegarde)
@@ -33,7 +34,8 @@
 10. [Tests](#tests)
 11. [Construire la version Windows](#construire-la-version-windows)
 12. [Limites connues](#limites-connues)
-13. [Historique des versions](#historique-des-versions)
+13. [Publier une release](#publier-une-release)
+14. [Historique des versions](#historique-des-versions)
 
 ---
 
@@ -47,6 +49,7 @@
 | **Reconnexion auto** | Après une coupure réseau ou une mise en veille : nouvel essai à 2, 4, 8, 15 puis 30 s, compte à rebours, tunnels relancés automatiquement |
 | **Verrouillage** | Écran verrouillé après inactivité (sessions et tunnels conservés), au verrouillage de Windows et en veille, **Windows Hello** (visage, empreinte, PIN) |
 | **Recherche** | `Ctrl+Shift+F` dans tout terminal : surlignage, compteur `2/6`, casse, mot entier, regex |
+| **Mises à jour** | Depuis **GitHub Releases** : notification, téléchargement en arrière-plan, archive **signée Ed25519** + SHA-256, redémarrage en un clic ou installation à la fermeture |
 | **Terminal SSH** | Onglets, reconnexion en un clic, copie à la sélection (une seule écriture, au relâchement de la souris), liens cliquables, 10 000 lignes d'historique |
 | **Terminal local** | PowerShell 7, Windows PowerShell, cmd, Git Bash, distributions WSL (détection automatique) ; bash/zsh/fish sous Linux/macOS |
 | **Split** | Jusqu'à 8 panneaux par onglet, **mélange local + SSH**, séparateurs déplaçables, zoom d'un panneau, diffusion de la saisie |
@@ -251,6 +254,18 @@ La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la conne
 - Toutes les occurrences sont surlignées, avec un compteur (`2/6`, `aucun`) et des repères dans la barre de défilement.
 - `Ctrl+F` seul reste envoyé au shell (bash, vim, less l'utilisent). Pour qu'il ouvre la recherche : **Paramètres ▸ Recherche dans le terminal**.
 
+### Mises à jour automatiques
+
+KSTermus interroge les [releases GitHub](https://github.com/koyaja/ksTerminalAllInOne/releases) au démarrage puis toutes les 6 h.
+
+1. **Nouvelle version** : une pastille `⬆ 1.x.y disponible` apparaît en haut à droite, avec un toast. Un clic affiche les notes de version.
+2. **Téléchargement** en arrière-plan (`⬇ 1.x.y · 42 %`), puis vérification de la **signature Ed25519** du manifeste et du **SHA-256** de l'archive. Au moindre écart, l'archive est supprimée et rien n'est installé.
+3. **Prête** : la pastille devient `⟳ Redémarrer pour 1.x.y`. Redémarrer ferme les onglets, remplace l'application et la relance. Sinon, la mise à jour s'installe **à la prochaine fermeture**, sans redémarrage forcé.
+
+- **Paramètres ▸ Mises à jour automatiques** : bouton *Vérifier* et case pour désactiver la vérification et le téléchargement automatiques.
+- Jamais de retour à une version plus ancienne. Le remplacement garde l'ancienne version tant que la nouvelle n'est pas en place (retour arrière en cas d'échec). Journal : `%TEMP%\kstermus-update\update.log`.
+- En mode développement (`npm start`), l'archive est seulement téléchargée : l'installation automatique ne concerne que la version installée.
+
 ---
 
 ## Raccourcis clavier
@@ -338,6 +353,7 @@ src/
 │   ├── remote-editor.js       Lecture / écriture de fichiers distants (SFTP ou sudo), conflits
 │   ├── local-pty.js           Terminaux locaux (ConPTY), détection des shells, sessions détachables
 │   ├── lock.js                Verrouillage d'écran : inactivité, filtrage IPC, anti force brute
+│   ├── updater.js             Mises à jour GitHub Releases : manifeste signé, téléchargement, remplacement
 │   ├── hello.js               Windows Hello (WinRT via PowerShell) + clé DPAPI au démarrage
 │   ├── keys.js                Validation des clés privées, empreintes
 │   └── ssh-config.js          Import ~/.ssh/config
@@ -350,6 +366,7 @@ build/
 ├── make-icon.py               Génération de l'icône (PNG + ICO multi-tailles)
 └── after-pack.js              Injection de l'icône et des infos de version dans le .exe
 assets/                        icon.png, icon.ico, icon-1024.png
+scripts/make-release.js        Prépare et signe une release
 test/run-tests.js              Tests d'intégration
 ```
 
@@ -371,7 +388,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-38 tests couvrent :
+45 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -382,6 +399,7 @@ KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 - **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer ;
 - **le verrouillage** : délai d'inactivité, IPC bloqués sauf déverrouillage, anti force brute, vérification du mot de passe, ouverture par clé ;
+- **les mises à jour** (faux serveur GitHub) : détection, téléchargement, SHA-256, signature falsifiée ou d'une autre clé, archive modifiée ou trop grande, pas de retour arrière de version, extraction et remplacement Windows ;
 - **Windows Hello** (simulé hors Windows) : disponibilité, vérification, annulation, Hello non configuré, clé du coffre jamais stockée en clair.
 
 L'interface a aussi été testée de bout en bout avec Playwright (Electron sous Xvfb).
@@ -408,6 +426,7 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 ## Limites connues
 
 - Les sessions locales détachées s'arrêtent quand KSTermus est fermé : il n'y a pas de serveur en arrière-plan comme avec tmux.
+- La 1.5.0 s'installe encore avec `INSTALLER-KSTermus.cmd` ; les versions suivantes arrivent toutes seules.
 - Pas de synchronisation entre PC : migration manuelle du dossier `%APPDATA%\KSTermus`.
 - L'exécutable n'est pas signé : Windows SmartScreen peut afficher un avertissement au premier lancement.
 - Les blocs de commandes sont repérés au moment où tu valides une commande avec Entrée. Sans intégration au shell, une commande lancée autrement (historique du shell rappelé par un raccourci propre au shell, par exemple) peut ne pas être repérée.
@@ -416,10 +435,32 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 
 ---
 
+## Publier une release
+
+La clé privée de signature (`kstermus-update-signing.pem`) **ne doit jamais être commitée** (`*.pem` est dans `.gitignore`). Sans elle, impossible de publier une mise à jour acceptée par les postes installés ; si elle fuit, n'importe qui peut en signer une. Garde-la hors du dépôt, avec une copie de sauvegarde.
+
+```bash
+# 1. Monter la version dans package.json, puis construire
+npm run dist:dir
+(cd dist && rm -rf pkg && mkdir -p pkg && cp -r win-unpacked pkg/KSTermus && cd pkg && zip -qr -9 ../KSTermus-win-x64.zip KSTermus)
+
+# 2. Signer : produit dist/release/{KSTermus-win-x64-<v>.zip, update.json, notes.md}
+node scripts/make-release.js --zip dist/KSTermus-win-x64.zip --notes notes.md --key ../kstermus-signing/kstermus-update-signing.pem
+
+# 3. Publier sur GitHub
+gh release create v1.5.0 dist/release/KSTermus-win-x64-1.5.0.zip dist/release/update.json \
+  --title "KSTermus 1.5.0" --notes-file dist/release/notes.md
+```
+
+Le script refuse une clé qui ne correspond pas à la clé publique intégrée (`src/main/updater.js`).
+
+---
+
 ## Historique des versions
 
 | Version | Contenu |
 |---|---|
+| **1.5.0** | Mises à jour automatiques depuis GitHub Releases (manifeste signé Ed25519, SHA-256, téléchargement en arrière-plan, redémarrer ou installer à la fermeture), script de release signée |
 | **1.4.0** | Verrouillage d'écran (sessions conservées) : automatique après inactivité, avec Windows et en veille, `Ctrl+Shift+L` ; déverrouillage Windows Hello (écran, et au démarrage en option) ; recherche dans le terminal (`Ctrl+Shift+F`) ; version affichée sur l'écran de verrouillage ; badge d'authentification des cartes host mieux aligné |
 | **1.3.0** | 2FA / OTP (keyboard-interactive), jump hosts multi-rebonds (+ import ProxyJump), reconnexion automatique des terminaux SSH et des tunnels, distinction fin de session / coupure |
 | **1.2.2** | Presse-papiers : plus de double collage (Ctrl+Shift+V / Ctrl+V), une seule copie par sélection (plus de doublons dans Win+V), Ctrl+C copie si du texte est sélectionné, Ctrl+V colle sous Windows |

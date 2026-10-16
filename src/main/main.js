@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen, powerMonitor, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen, powerMonitor, safeStorage, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -14,6 +14,7 @@ const { LocalManager } = require('./local-pty');
 const { parsePrivateKey } = require('./keys');
 const { LockController } = require('./lock');
 const { Hello } = require('./hello');
+const { Updater } = require('./updater');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -26,6 +27,29 @@ const lock = new LockController({
   }
 });
 setInterval(() => { if (vault.isUnlocked()) lock.tick(); }, 10000).unref();
+
+// ----- Mises à jour (GitHub Releases, archive signée) -----
+const updater = new Updater({
+  currentVersion: app.getVersion(),
+  feed: process.env.KST_UPDATE_FEED || undefined,
+  fetch: (u, o) => net.fetch(u, o),
+  dir: path.join(app.getPath('temp'), 'kstermus-update'),
+  isPackaged: app.isPackaged,
+  appDir: path.dirname(process.execPath),
+  exeName: path.basename(process.execPath),
+  emit: (c, p) => { if (win && !win.isDestroyed()) win.webContents.send(c, p); }
+});
+// Préférence lue hors du coffre : la vérification tourne aussi avant le déverrouillage.
+const updPrefsFile = path.join(app.getPath('userData'), 'update-prefs.json');
+function autoUpdateEnabled() { try { return JSON.parse(fs.readFileSync(updPrefsFile, 'utf8')).autoUpdate !== false; } catch { return true; } }
+async function autoUpdateCycle() {
+  if (!autoUpdateEnabled()) return;
+  const st = await updater.check();
+  if (st.status === 'available' && autoUpdateEnabled()) await updater.download();
+}
+setTimeout(autoUpdateCycle, 15000).unref();
+setInterval(autoUpdateCycle, 6 * 3600 * 1000).unref();
+let quittingForUpdate = false;
 function applyLockSettings() {
   const st = vault.isUnlocked() ? vault.data.settings || {} : {};
   lock.configure({ minutes: st.autoLockMinutes === undefined ? 15 : st.autoLockMinutes });
@@ -144,7 +168,11 @@ handle('vault:backup', async () => {
   return r.filePath;
 });
 handle('state:get', () => publicState());
-handle('settings:save', (s) => { const d = requireUnlocked(); d.settings = { ...d.settings, ...s }; vault.save(); applyLockSettings(); return publicState(); });
+handle('settings:save', (s) => {
+  const d = requireUnlocked(); d.settings = { ...d.settings, ...s }; vault.save(); applyLockSettings();
+  if ('autoUpdate' in s) fs.writeFileSync(updPrefsFile, JSON.stringify({ autoUpdate: s.autoUpdate !== false }));
+  return publicState();
+});
 
 // ----- Hosts -----
 handle('host:save', (input) => {
@@ -597,6 +625,17 @@ handle('window:control', (action) => {
   else if (action === 'close') win.close();
   return { maximized: win.isMaximized(), fullscreen: win.isFullScreen() };
 });
+handle('update:state', () => updater.set({}));
+handle('update:check', async () => updater.check());
+handle('update:download', async () => updater.download());
+handle('update:install', () => {
+  updater.apply({ relaunch: true });
+  quittingForUpdate = true;
+  manager.closeAll(); localMgr.killAll(); vault.lock();
+  setTimeout(() => app.exit(0), 200);
+  return true;
+});
+handle('update:openPage', () => { shell.openExternal(updater.state.page || 'https://github.com/koyaja/ksTerminalAllInOne/releases'); return true; });
 handle('window:info', () => ({ platform: process.platform, titlebarHeight: TITLEBAR_H, maximized: win ? win.isMaximized() : false, version: app.getVersion() }));
 
 // Une seule instance : relancer l'app remet la fenêtre existante au premier plan.
@@ -625,3 +664,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 app.on('window-all-closed', () => { manager.closeAll(); localMgr.killAll(); vault.lock(); app.quit(); });
+// Mise à jour prête mais pas appliquée : installée à la fermeture (sans relancer).
+app.on('will-quit', () => {
+  if (quittingForUpdate || !updater.stageReady) return;
+  try { updater.apply({ relaunch: false }); } catch { /* ignore */ }
+});
