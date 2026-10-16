@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen, powerMonitor, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -12,9 +12,24 @@ installEditor(SshManager);
 const { parseSshConfig } = require('./ssh-config');
 const { LocalManager } = require('./local-pty');
 const { parsePrivateKey } = require('./keys');
+const { LockController } = require('./lock');
+const { Hello } = require('./hello');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
+const hello = new Hello({ dir: app.getPath('userData'), safeStorage });
+// Verrouillage d'écran : sessions conservées, interface et IPC bloqués.
+const lock = new LockController({
+  onLock: (reason) => {
+    clearSecretClipboard();
+    if (win && !win.isDestroyed()) win.webContents.send('app:locked', { reason });
+  }
+});
+setInterval(() => { if (vault.isUnlocked()) lock.tick(); }, 10000).unref();
+function applyLockSettings() {
+  const st = vault.isUnlocked() ? vault.data.settings || {} : {};
+  lock.configure({ minutes: st.autoLockMinutes === undefined ? 15 : st.autoLockMinutes });
+}
 const pendingHostKeys = new Map();
 const pendingPrompts = new Map();
 
@@ -64,17 +79,64 @@ function publicState() {
 // Enveloppe les handlers : renvoie { ok, value } ou { ok:false, error } au renderer.
 function handle(channel, fn) {
   ipcMain.handle(channel, async (_e, ...args) => {
+    if (!lock.allowed(channel)) return { ok: false, error: 'Écran verrouillé' };
     try { return { ok: true, value: await fn(...args) }; }
     catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
   });
 }
 
 // ----- Coffre -----
-handle('vault:status', () => ({ exists: vault.exists(), unlocked: vault.isUnlocked() }));
-handle('vault:create', (pw) => { vault.create(pw); return publicState(); });
-handle('vault:unlock', (pw) => { vault.unlock(pw); return publicState(); });
-handle('vault:lock', () => { manager.closeAll(); localMgr.killAll(); vault.lock(); return true; });
-handle('vault:changePassword', (oldPw, newPw) => { vault.changePassword(oldPw, newPw); return true; });
+handle('vault:status', () => ({
+  exists: vault.exists(), unlocked: vault.isUnlocked(), screenLocked: lock.locked,
+  helloStartup: process.platform === 'win32' && hello.hasStartupKey(),
+  helloScreen: vault.isUnlocked() && !!(vault.data.settings || {}).helloScreen,
+  version: app.getVersion()
+}));
+function afterUnlock() { lock.unlock(); applyLockSettings(); return publicState(); }
+handle('vault:create', (pw) => { vault.create(pw); return afterUnlock(); });
+handle('vault:unlock', (pw) => {
+  lock.checkThrottle();
+  try { vault.unlock(pw); } catch (e) { lock.fail(); throw e; }
+  return afterUnlock();
+});
+// Verrouillage complet : ferme tout et efface la clé de la mémoire.
+handle('vault:lock', () => { manager.closeAll(); localMgr.killAll(); vault.lock(); lock.unlock(); return true; });
+// Verrouillage d'écran : les sessions continuent.
+handle('lock:screen', () => { if (!vault.isUnlocked()) return false; return lock.lock('manuel'); });
+handle('vault:unlockScreen', (pw) => {
+  if (!lock.locked) return publicState();
+  lock.checkThrottle();
+  if (!vault.verifyPassword(pw)) { lock.fail(); throw new Error('Mot de passe maître incorrect'); }
+  return afterUnlock();
+});
+handle('vault:changePassword', (oldPw, newPw) => {
+  vault.changePassword(oldPw, newPw);
+  if (hello.hasStartupKey()) hello.storeStartupKey(vault.key, vault.salt); // garde Hello au démarrage valide
+  return true;
+});
+handle('hello:status', async () => ({ ...(await hello.available()), startup: hello.hasStartupKey() }));
+handle('hello:unlock', async () => {
+  lock.checkThrottle();
+  if (vault.isUnlocked()) {
+    if (!lock.locked) return publicState();
+    if (!(vault.data.settings || {}).helloScreen) throw new Error('Windows Hello n\'est pas activé pour l\'écran verrouillé');
+    await hello.verify('Déverrouiller KSTermus');
+    return afterUnlock();
+  }
+  if (!hello.hasStartupKey()) throw new Error('Windows Hello n\'est pas activé au démarrage');
+  await hello.verify('Ouvrir le coffre KSTermus');
+  const { key } = hello.readStartupKey();
+  try { vault.unlockWithKey(key); } catch (e) { hello.clearStartupKey(); throw e; } finally { key.fill(0); }
+  return afterUnlock();
+});
+handle('hello:configure', async ({ screen: onScreen, startup }) => {
+  const d = requireUnlocked();
+  if (onScreen || startup) await hello.verify('Activer Windows Hello pour KSTermus');
+  d.settings = { ...d.settings, helloScreen: !!(onScreen || startup) };
+  vault.save();
+  if (startup) hello.storeStartupKey(vault.key, vault.salt); else hello.clearStartupKey();
+  return publicState();
+});
 handle('vault:backup', async () => {
   const r = await dialog.showSaveDialog(win, { defaultPath: `kstermus-backup-${new Date().toISOString().slice(0, 10)}.kst` });
   if (r.canceled || !r.filePath) return false;
@@ -82,7 +144,7 @@ handle('vault:backup', async () => {
   return r.filePath;
 });
 handle('state:get', () => publicState());
-handle('settings:save', (s) => { const d = requireUnlocked(); d.settings = { ...d.settings, ...s }; vault.save(); return publicState(); });
+handle('settings:save', (s) => { const d = requireUnlocked(); d.settings = { ...d.settings, ...s }; vault.save(); applyLockSettings(); return publicState(); });
 
 // ----- Hosts -----
 handle('host:save', (input) => {
@@ -282,7 +344,8 @@ ipcMain.on('hostkey:answer', (_e, { reqId, ok }) => {
 
 // ----- Terminal -----
 handle('ssh:open', (sessionId, hostId, cols, rows) => manager.openShell(sessionId, hostId, cols, rows));
-ipcMain.on('ssh:write', (_e, { sessionId, data }) => localMgr.has(sessionId) ? localMgr.write(sessionId, data) : manager.write(sessionId, data));
+ipcMain.on('app:activity', () => lock.activity());
+ipcMain.on('ssh:write', (_e, { sessionId, data }) => lock.locked ? undefined : localMgr.has(sessionId) ? localMgr.write(sessionId, data) : manager.write(sessionId, data));
 ipcMain.on('ssh:resize', (_e, { sessionId, cols, rows }) => localMgr.has(sessionId) ? localMgr.resize(sessionId, cols, rows) : manager.resize(sessionId, cols, rows));
 handle('ssh:close', (sessionId) => { if (localMgr.has(sessionId)) localMgr.kill(sessionId); else manager.close(sessionId); return true; });
 
@@ -331,8 +394,14 @@ handle('sftp:close', (sessionId) => { manager.close(sessionId); return true; });
 handle('clipboard:write', (t) => { clipboard.writeText(String(t)); return true; });
 // Copie d'un secret : effacé du presse-papiers après 30 s s'il n'a pas changé.
 let secretTimer = null;
+let lastSecret = null;
+function clearSecretClipboard() {
+  if (lastSecret !== null && clipboard.readText() === lastSecret) clipboard.clear();
+  lastSecret = null; clearTimeout(secretTimer);
+}
 function copySecret(text) {
   clipboard.writeText(String(text));
+  lastSecret = String(text);
   clearTimeout(secretTimer);
   secretTimer = setTimeout(() => { if (clipboard.readText() === String(text)) clipboard.clear(); }, 30000);
   return true;
@@ -543,6 +612,10 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     if (process.platform === 'win32') app.setAppUserModelId('com.cyberisk.kstermus');
     createWindow();
+    // Verrouille aussi quand Windows se verrouille ou se met en veille.
+    const sysLock = () => { if (vault.isUnlocked() && (vault.data.settings || {}).lockOnSystemLock !== false) lock.lock('session Windows verrouillée'); };
+    powerMonitor.on('lock-screen', sysLock);
+    powerMonitor.on('suspend', sysLock);
     screen.on('display-removed', () => {
       if (!win) return;
       const b = win.getBounds();

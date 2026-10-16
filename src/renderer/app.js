@@ -1,5 +1,5 @@
 'use strict';
-/* global Terminal, FitAddon, WebLinksAddon */
+/* global Terminal, FitAddon, WebLinksAddon, SearchAddon */
 (() => {
   const api = window.kst;
 
@@ -158,17 +158,36 @@
     }
   }
 
+  // Deux modes : 'vault' (coffre fermé : création ou ouverture) et 'screen'
+  // (écran verrouillé : sessions conservées, on revérifie juste l'identité).
+  let lockMode = 'vault';
   async function initLock() {
     wrapLockInputs();
     const st = await api.invoke('vault:status');
+    $('#lock-version').textContent = st.version ? 'KSTermus v' + st.version : '';
+    if (st.unlocked && st.screenLocked) { showScreenLock(null, st); return; }
     if (st.unlocked) { setState(await api.invoke('state:get')); showApp(); return; }
+    lockMode = 'vault';
     const creating = !st.exists;
+    showLockScreen({
+      hint: creating ? 'Crée ton mot de passe maître pour chiffrer le coffre.' : 'Coffre verrouillé.',
+      btn: creating ? 'Créer le coffre' : 'Déverrouiller',
+      creating, hello: !creating && st.helloStartup, full: false
+    });
+    if (!creating && st.helloStartup && autoHello) { autoHello = false; setTimeout(unlockWithHello, 300); }
+  }
+  let autoHello = true; // propose Hello automatiquement au lancement
+
+  function showLockScreen({ hint, btn, creating, hello, full }) {
     $('#lock').hidden = false;
     $('#app').hidden = true;
     $('#lock-pw2-wrap').hidden = !creating;
-    $('#lock-pw2').required = creating;
-    $('#lock-hint').textContent = creating ? 'Crée ton mot de passe maître pour chiffrer le coffre.' : 'Coffre verrouillé.';
-    $('#lock-btn').textContent = creating ? 'Créer le coffre' : 'Déverrouiller';
+    $('#lock-pw2').required = !!creating;
+    $('#lock-hint').textContent = hint;
+    $('#lock-btn').textContent = btn;
+    $('#lock-hello').hidden = !hello;
+    $('#lock-full').hidden = !full;
+    $('#lock-note').hidden = !!full;
     $('#lock-pw').value = ''; $('#lock-pw2').value = '';
     $('#lock-error').hidden = true;
     setTimeout(() => $('#lock-pw').focus(), 50);
@@ -179,31 +198,101 @@
       err.hidden = true;
       if (creating && pw !== $('#lock-pw2').value) { err.textContent = 'Les deux mots de passe diffèrent'; err.hidden = false; return; }
       $('#lock-btn').disabled = true;
-      $('#lock-btn').textContent = 'Déchiffrement…';
+      $('#lock-btn').textContent = lockMode === 'screen' ? 'Vérification…' : 'Déchiffrement…';
       try {
-        const s = await api.invoke(creating ? 'vault:create' : 'vault:unlock', pw);
-        setState(s);
-        showApp();
+        const ch = lockMode === 'screen' ? 'vault:unlockScreen' : creating ? 'vault:create' : 'vault:unlock';
+        const s = await api.invoke(ch, pw);
+        unlocked(s);
       } catch (ex) {
         err.textContent = ex.message; err.hidden = false;
+        $('#lock-pw').select();
       } finally {
         $('#lock-btn').disabled = false;
-        $('#lock-btn').textContent = creating ? 'Créer le coffre' : 'Déverrouiller';
+        $('#lock-btn').textContent = btn;
       }
     };
   }
+
+  function unlocked(s) {
+    const wasScreen = lockMode === 'screen';
+    lockMode = 'vault';
+    if (wasScreen) {
+      S = s;
+      $('#lock').hidden = true; $('#app').hidden = false;
+      renderSection(); renderTabs();
+      const t = tabs.get(ui.activeTab);
+      if (t) { fitTab(t); requestAnimationFrame(() => { fitTab(t); if (t.kind === 'term') { const p = t.panes.get(t.activePane); if (p) p.term.focus(); } }); }
+    } else { setState(s); showApp(); }
+  }
+
   function showApp() {
     $('#lock').hidden = true; $('#app').hidden = false; activateTab('home');
     api.invoke('local:shells').then(list => { ui.shells = list || []; if (ui.section === 'local') renderSection(); }).catch(() => {});
   }
 
-  $('#btn-lock').onclick = async () => {
-    if (tabs.size && !(await confirmBox('Verrouiller', 'Toutes les sessions et tunnels seront fermés.', 'Verrouiller'))) return;
+  async function unlockWithHello() {
+    const b = $('#lock-hello'), err = $('#lock-error');
+    if (b.disabled) return;
+    err.hidden = true;
+    b.disabled = true; b.textContent = '🙂 Regarde la caméra ou pose ton doigt…';
+    try { unlocked(await api.invoke('hello:unlock')); }
+    catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    finally { b.disabled = false; b.textContent = '🙂 Windows Hello'; }
+  }
+  $('#lock-hello').onclick = unlockWithHello;
+  // Double clic de confirmation (une modale serait masquée par l'écran de verrouillage).
+  let fullArmed = 0;
+  $('#lock-full').onclick = async () => {
+    const b = $('#lock-full');
+    if (Date.now() - fullArmed > 4000) {
+      fullArmed = Date.now();
+      b.textContent = 'Clique encore pour tout fermer (sessions, terminaux, tunnels)';
+      setTimeout(() => { b.textContent = 'Fermer toutes les sessions et verrouiller le coffre'; }, 4000);
+      return;
+    }
+    fullArmed = 0;
+    b.textContent = 'Fermer toutes les sessions et verrouiller le coffre';
+    await fullLock();
+  };
+
+  function showScreenLock(reason, st) {
+    if (!$('#lock').hidden && lockMode === 'screen') return;
+    lockMode = 'screen';
+    document.querySelectorAll('.palette').forEach(x => x.remove());
+    setPrefix(false);
+    const helloOn = st ? st.helloScreen : !!(S && S.settings.helloScreen);
+    const n = [...tabs.values()].filter(t => t.kind !== 'edit').length;
+    showLockScreen({
+      hint: (reason === 'inactivité' ? 'Verrouillé après inactivité.' : reason && reason !== 'manuel' ? 'Verrouillé (' + reason + ').' : 'Écran verrouillé.') +
+        (n ? ` ${n} onglet(s) toujours actif(s).` : ''),
+      btn: 'Déverrouiller', creating: false, hello: helloOn, full: true
+    });
+    if (helloOn && api.platform === 'win32' && reason !== 'session Windows verrouillée') setTimeout(() => { if (lockMode === 'screen') unlockWithHello(); }, 300);
+  }
+  api.on('app:locked', ({ reason }) => showScreenLock(reason));
+
+  async function fullLock() {
     for (const id of [...tabs.keys()]) disposeTab(id);
     await api.invoke('vault:lock');
     S = null;
+    lockMode = 'vault';
+    autoHello = false;
     initLock();
-  };
+  }
+
+  // Activité utilisateur (pour le verrouillage auto) — envoyée au plus toutes les 5 s.
+  let lastPing = 0;
+  for (const ev of ['keydown', 'mousedown', 'mousemove', 'wheel', 'touchstart']) {
+    window.addEventListener(ev, () => { const now = Date.now(); if (now - lastPing > 5000 && $('#lock').hidden) { lastPing = now; api.activity(); } }, { capture: true, passive: true });
+  }
+
+  $('#btn-lock').onclick = (e) => popupMenu(e.currentTarget, [
+    { label: '🔒 Verrouiller l\'écran', sub: 'Sessions et tunnels continuent — Ctrl+Shift+L', onClick: () => api.invoke('lock:screen').catch(() => {}) },
+    { label: '⏏ Tout fermer et verrouiller le coffre', sub: 'Déconnecte tout, efface la clé de la mémoire', onClick: async () => {
+      if (tabs.size && !(await confirmBox('Verrouiller le coffre', 'Toutes les sessions et tunnels seront fermés.', 'Verrouiller'))) return;
+      await fullLock();
+    } }
+  ]);
 
   // ---------- Navigation ----------
   document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', () => {
@@ -608,6 +697,10 @@
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Reconnexion automatique SSH' }), h('div', { class: 'muted small', text: 'Après une coupure réseau ou une mise en veille : nouvel essai à 2, 4, 8, 15 puis 30 s.' })),
           (() => { const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' } }); c.checked = S.settings.autoReconnect !== false;
             c.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoReconnect: c.checked })); if (s) S = s; }); return c; })()),
+        securityRows(),
+        h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Recherche dans le terminal' }), h('div', { class: 'muted small', text: 'Ctrl+Shift+F ouvre toujours la recherche. Avec Ctrl+F, la touche n\'est plus envoyée au shell (avance d\'un caractère dans bash, page suivante dans vim/less).' })),
+          (() => { const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' }, title: 'Ctrl+F ouvre aussi la recherche' }); c.checked = !!S.settings.ctrlFSearch;
+            c.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { ctrlFSearch: c.checked })); if (s) S = s; }); return c; })()),
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Préfixe façon tmux' }), h('div', { class: 'muted small', text: 'Touche à presser avant une commande de panneau (préfixe puis ? pour l\'aide).' })),
           (() => { const sel = h('select', { style: { width: '150px' } }, [['ctrl+b', 'Ctrl+B (tmux)'], ['ctrl+a', 'Ctrl+A (screen)'], ['off', 'Désactivé']].map(([v, l]) => h('option', { value: v, text: l })));
             sel.value = prefixKey(); sel.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { tmuxPrefix: sel.value })); if (s) { S = s; toast('Préfixe : ' + sel.options[sel.selectedIndex].text); } }); return sel; })()),
@@ -622,8 +715,51 @@
           h('div', { class: 'kbd-list' }, SHORTCUTS.map(([k, d]) => h('div', { class: 'kbd-row' }, h('kbd', { text: k }), h('span', { text: d }))))))));
   }
 
+  function checkbox(checked, onChange) {
+    const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' } });
+    c.checked = checked;
+    c.addEventListener('change', () => onChange(c));
+    return c;
+  }
+  function securityRows() {
+    const lockSel = h('select', { style: { width: '150px' } }, [[0, 'Jamais'], [1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 heure'], [240, '4 heures']].map(([v, l]) => h('option', { value: String(v), text: l })));
+    lockSel.value = String(S.settings.autoLockMinutes === undefined ? 15 : S.settings.autoLockMinutes);
+    lockSel.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoLockMinutes: Number(lockSel.value) })); if (s) S = s; });
+
+    const helloSel = h('select', { style: { width: '200px' }, disabled: true },
+      h('option', { value: 'off', text: 'Désactivé' }), h('option', { value: 'screen', text: 'Écran verrouillé' }), h('option', { value: 'startup', text: 'Écran + démarrage' }));
+    const helloInfo = h('div', { class: 'muted small', text: 'Vérification de Windows Hello…' });
+    const helloDesc = 'Visage, empreinte ou code PIN Windows. « Démarrage » garde la clé du coffre chiffrée par Windows (DPAPI) : quiconque ouvre ta session Windows ET passe Hello ouvre le coffre.';
+    let current = 'off';
+    api.invoke('hello:status').then(st => {
+      current = st.startup ? 'startup' : S.settings.helloScreen ? 'screen' : 'off';
+      helloSel.value = current;
+      helloSel.disabled = !st.ok && current === 'off';
+      helloInfo.textContent = st.ok ? helloDesc : 'Indisponible : ' + (st.reason || 'Windows Hello absent');
+    }).catch(e => { helloInfo.textContent = 'Indisponible : ' + e.message; });
+    helloSel.addEventListener('change', async () => {
+      const v = helloSel.value;
+      helloSel.disabled = true;
+      if (v !== 'off') helloInfo.textContent = 'Confirme avec Windows Hello…';
+      const s = await guard(() => api.invoke('hello:configure', { screen: v !== 'off', startup: v === 'startup' }));
+      helloSel.disabled = false;
+      helloInfo.textContent = helloDesc;
+      if (s) { S = s; current = v; toast(v === 'off' ? 'Windows Hello désactivé' : 'Windows Hello activé'); }
+      else helloSel.value = current;
+    });
+
+    return [
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Verrouillage automatique' }), h('div', { class: 'muted small', text: 'Après cette durée sans clavier ni souris dans KSTermus. Les sessions et tunnels continuent ; Ctrl+Shift+L verrouille tout de suite.' })), lockSel),
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Verrouiller avec Windows' }), h('div', { class: 'muted small', text: 'Quand la session Windows se verrouille (Win+L) ou que le PC se met en veille.' })),
+        checkbox(S.settings.lockOnSystemLock !== false, async (c) => { const s = await guard(() => api.invoke('settings:save', { lockOnSystemLock: c.checked })); if (s) S = s; })),
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Windows Hello' }), helloInfo), helloSel)
+    ];
+  }
+
   const SHORTCUTS = [
     ['Ctrl+Shift+P', 'Palette de commandes'],
+    ['Ctrl+Shift+L', 'Verrouiller l\'écran (sessions conservées)'],
+    ['Ctrl+Shift+F', 'Rechercher dans le terminal (Entrée / Maj+Entrée, Échap)'],
     ['Ctrl+T', 'Nouvelle connexion (local ou SSH)'],
     ['Ctrl+Shift+T', 'Nouveau terminal local (shell par défaut)'],
     ['Ctrl+B puis …', 'Préfixe façon tmux (voir Local)'],
@@ -809,6 +945,7 @@
     if (k === '[') { jumpCommand(p, -1); return true; }
     if (k === ']') { jumpCommand(p, 1); return true; }
     if (k === 'y') { copyLastOutput(p); return true; }
+    if (k === '/') { openTermSearch(p); return true; }
     return true; // touche inconnue : consommée, comme tmux
   }
 
@@ -823,6 +960,8 @@
     const inModal = !!document.querySelector('.backdrop, .palette');
     if (ui.prefixAt && Date.now() - ui.prefixAt < PREFIX_MS && !inModal) { stop(); setPrefix(false); runPrefixCommand(e, term); return; }
     if (!inModal && isPrefix(e) && (term || ui.activeTab === 'home')) { stop(); setPrefix(true); return; }
+    if (term && e.ctrlKey && !e.altKey && e.code === 'KeyF' && (e.shiftKey || S.settings.ctrlFSearch) && !inModal) { stop(); openTermSearch(term.panes.get(term.activePane)); return; }
+    if (e.ctrlKey && e.shiftKey && k === 'l') { stop(); api.invoke('lock:screen').catch(() => {}); return; }
     if (e.ctrlKey && e.shiftKey && k === 'p') { stop(); openPalette(); return; }
     if (inModal) return;
     if (e.ctrlKey && !e.shiftKey && k === 's' && t && t.kind === 'edit') { stop(); t.save(); return; }
@@ -975,9 +1114,11 @@
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon.WebLinksAddon((_e, uri) => window.open(uri)));
+    const searchAddon = new SearchAddon.SearchAddon();
+    term.loadAddon(searchAddon);
     term.open(termHost);
 
-    const p = { id, tabId: t.id, spec: { ...spec }, hostId: isLocal ? null : spec.hostId, isLocal, title: title0, el, wrap, dot, term, status: 'wait', ro: null, blocks: [] };
+    const p = { id, search: searchAddon, tabId: t.id, spec: { ...spec }, hostId: isLocal ? null : spec.hostId, isLocal, title: title0, el, wrap, dot, term, status: 'wait', ro: null, blocks: [] };
     p.fit = () => {
       if (t.el.hidden || !el.isConnected || el.offsetParent === null) return;
       try {
@@ -1159,6 +1300,70 @@
     if (!r) { toast('Aucune commande terminée à copier', true); return; }
     await api.invoke('clipboard:write', r.output);
     toast(`Sortie copiée (${r.output.split('\n').length} ligne(s)) : ${r.command.slice(0, 60)}`);
+  }
+
+  // ---------- Recherche dans le terminal (Ctrl+Shift+F) ----------
+  const SEARCH_DECO = {
+    matchBackground: '#4a3f1c', matchBorder: '#8a7130', matchOverviewRuler: '#f5b84a',
+    activeMatchBackground: '#f5b84a', activeMatchBorder: '#ffd27a', activeMatchColorOverviewRuler: '#ffd27a'
+  };
+  function openTermSearch(p) {
+    if (!p || !p.search) return;
+    const sel = p.term.hasSelection() ? p.term.getSelection() : '';
+    if (p.searchBar) {
+      if (sel && !sel.includes('\n')) p.searchInput.value = sel;
+      p.searchInput.focus(); p.searchInput.select();
+      return;
+    }
+    const opts = { caseSensitive: false, regex: false, wholeWord: false };
+    const input = h('input', { type: 'text', placeholder: 'Rechercher…', spellcheck: 'false', value: sel && !sel.includes('\n') ? sel : (p.lastSearch || '') });
+    const count = h('span', { class: 'count' });
+    const run = (incremental, back) => {
+      const q = input.value;
+      p.lastSearch = q;
+      count.classList.remove('none');
+      if (!q) { p.search.clearDecorations(); count.textContent = ''; return; }
+      let found = false;
+      try {
+        const o = { ...opts, incremental: !!incremental, decorations: SEARCH_DECO };
+        found = back ? p.search.findPrevious(q, o) : p.search.findNext(q, o);
+      } catch { count.textContent = 'regex ?'; count.classList.add('none'); return; }
+      if (!found) { count.textContent = 'aucun'; count.classList.add('none'); }
+    };
+    const opt = (key, label, title) => {
+      const b = h('button', { class: 'opt', title, text: label });
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.onclick = () => { opts[key] = !opts[key]; b.classList.toggle('on', opts[key]); run(true); };
+      return b;
+    };
+    const close = () => {
+      p.search.clearDecorations();
+      if (p.searchSub) { p.searchSub.dispose(); p.searchSub = null; }
+      bar.remove(); p.searchBar = null; p.searchInput = null;
+      p.term.focus();
+    };
+    const btn = (label, title, fn) => { const b = h('button', { class: 'icon-btn mini', title, text: label }); b.addEventListener('mousedown', (e) => e.preventDefault()); b.onclick = fn; return b; };
+    const bar = h('div', { class: 'term-search' },
+      input, count,
+      opt('caseSensitive', 'Aa', 'Respecter la casse'), opt('wholeWord', 'ab', 'Mot entier'), opt('regex', '.*', 'Expression régulière'),
+      btn('↑', 'Précédent (Maj+Entrée)', () => run(false, true)),
+      btn('↓', 'Suivant (Entrée)', () => run(false, false)),
+      btn('✕', 'Fermer (Échap)', close));
+    p.searchSub = p.search.onDidChangeResults(({ resultIndex, resultCount }) => {
+      if (!input.value) return;
+      count.classList.toggle('none', resultCount === 0);
+      count.textContent = resultCount === 0 ? 'aucun' : resultIndex >= 0 ? `${resultIndex + 1}/${resultCount}${resultCount >= 1000 ? '+' : ''}` : `${resultCount}${resultCount >= 1000 ? '+' : ''}`;
+    });
+    input.addEventListener('input', () => run(true));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); run(false, e.shiftKey); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    });
+    bar.addEventListener('mousedown', (e) => e.stopPropagation());
+    p.wrap.append(bar);
+    p.searchBar = bar; p.searchInput = input;
+    input.focus(); input.select();
+    if (input.value) run(true);
   }
 
   function setActivePane(t, id) {
@@ -1488,7 +1693,7 @@
     ['z', 'Agrandir / restaurer'], ['x', 'Fermer le panneau'], ['d', 'Détacher (session locale en arrière-plan)'], ['s', 'Rattacher une session détachée'],
     ['c', 'Nouveau terminal local'], ['n / p', 'Onglet suivant / précédent'], ['0…9', 'Aller à l\'onglet'], ['w', 'Choisir un onglet'],
     [',', 'Renommer l\'onglet'], ['S', 'Sauvegarder l\'espace de travail'], ['b', 'Diffusion de la saisie'], ['[ / ]', 'Commande précédente / suivante'],
-    ['y', 'Copier la sortie de la dernière commande'], [':', 'Palette de commandes'], ['?', 'Cette aide'], ['préfixe ×2', 'Envoie le préfixe au shell']
+    ['y', 'Copier la sortie de la dernière commande'], ['/', 'Rechercher dans le terminal'], [':', 'Palette de commandes'], ['?', 'Cette aide'], ['préfixe ×2', 'Envoie le préfixe au shell']
   ];
   function tmuxHelpTable() {
     const pk = prefixKey() === 'off' ? 'désactivé' : prefixKey().replace('ctrl+', 'Ctrl+').replace(/\+(\w)$/, (_m, c) => '+' + c.toUpperCase());
@@ -1527,6 +1732,7 @@
       add('Panneau', term.broadcast ? 'Arrêter la diffusion' : 'Diffuser la saisie à tous les panneaux', () => toggleBroadcast(term), 'Ctrl+Shift+B');
       add('Panneau', 'Fermer le panneau', () => closePane(term, term.activePane), 'Ctrl+Shift+W');
       if (p && p.isLocal) add('Panneau', 'Détacher le panneau', () => detachPane(term, term.activePane), 'préfixe d');
+      add('Panneau', 'Rechercher dans le terminal', () => openTermSearch(p), 'Ctrl+Shift+F');
       add('Blocs', 'Copier la sortie de la dernière commande', () => copyLastOutput(p), 'Ctrl+Shift+O');
       add('Blocs', 'Aller à la commande précédente', () => jumpCommand(p, -1), 'Ctrl+Shift+↑');
       add('Blocs', 'Aller à la commande suivante', () => jumpCommand(p, 1), 'Ctrl+Shift+↓');

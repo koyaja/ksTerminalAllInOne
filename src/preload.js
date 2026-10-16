@@ -20,5 +20,6 @@ contextBridge.exposeInMainWorld('kst', {
   resize: (sessionId, cols, rows) => ipcRenderer.send('ssh:resize', { sessionId, cols, rows }),
   answerHostKey: (reqId, ok) => ipcRenderer.send('hostkey:answer', { reqId, ok }),
   answerPrompt: (reqId, answers) => ipcRenderer.send('ssh:promptAnswer', { reqId, answers }),
+  activity: () => ipcRenderer.send('app:activity'),
   platform: process.platform
 });

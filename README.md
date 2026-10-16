@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.3.0**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.4.0**
 
 ---
 
@@ -23,6 +23,8 @@
    - [Keychain et mots de passe](#keychain-et-mots-de-passe)
    - [Port forwarding](#port-forwarding)
    - [Known hosts](#known-hosts)
+   - [Verrouillage et Windows Hello](#verrouillage-et-windows-hello)
+   - [Recherche dans le terminal](#recherche-dans-le-terminal)
 5. [Raccourcis clavier](#raccourcis-clavier)
 6. [Sécurité](#sécurité)
 7. [Données et sauvegarde](#données-et-sauvegarde)
@@ -43,6 +45,8 @@
 | **Authentification** | Mot de passe, clé du keychain (avec passphrase), agent SSH (OpenSSH / Pageant), **2FA / OTP** (Google Authenticator, Duo…) |
 | **Jump host** | Connexion via un ou plusieurs bastions (ProxyJump), pour SSH, SFTP, éditeur et tunnels ; import de `ProxyJump` depuis `~/.ssh/config` |
 | **Reconnexion auto** | Après une coupure réseau ou une mise en veille : nouvel essai à 2, 4, 8, 15 puis 30 s, compte à rebours, tunnels relancés automatiquement |
+| **Verrouillage** | Écran verrouillé après inactivité (sessions et tunnels conservés), au verrouillage de Windows et en veille, **Windows Hello** (visage, empreinte, PIN) |
+| **Recherche** | `Ctrl+Shift+F` dans tout terminal : surlignage, compteur `2/6`, casse, mot entier, regex |
 | **Terminal SSH** | Onglets, reconnexion en un clic, copie à la sélection (une seule écriture, au relâchement de la souris), liens cliquables, 10 000 lignes d'historique |
 | **Terminal local** | PowerShell 7, Windows PowerShell, cmd, Git Bash, distributions WSL (détection automatique) ; bash/zsh/fish sous Linux/macOS |
 | **Split** | Jusqu'à 8 panneaux par onglet, **mélange local + SSH**, séparateurs déplaçables, zoom d'un panneau, diffusion de la saisie |
@@ -223,6 +227,30 @@ Un tunnel coupé (et non arrêté par toi) est **relancé automatiquement** (2, 
 
 La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la connexion est **bloquée**, avec l'ancienne et la nouvelle empreinte affichées : il peut s'agir d'une réinstallation ou d'une attaque de type *man-in-the-middle*. **Oublier** permet de réaccepter après vérification.
 
+### Verrouillage et Windows Hello
+
+**Verrouiller l'écran** (`Ctrl+Shift+L` ou 🔒 ▸ *Verrouiller l'écran*) masque l'interface **sans couper** les sessions SSH, les terminaux locaux ni les tunnels. Pendant le verrou, le process principal refuse toute demande de l'interface (mots de passe, état du coffre, saisie dans les terminaux) sauf le déverrouillage, et un mot de passe copié est retiré du presse-papiers.
+
+| Réglage (Paramètres) | Effet |
+|---|---|
+| **Verrouillage automatique** | Après 1, 5, **15** (défaut), 30, 60 min ou 4 h sans clavier ni souris dans KSTermus ; *Jamais* pour désactiver |
+| **Verrouiller avec Windows** | Verrouille aussi sur `Win+L` et à la mise en veille (activé par défaut) |
+| **Windows Hello** | *Écran verrouillé* : visage, empreinte ou PIN au lieu du mot de passe maître. *Écran + démarrage* : aussi pour ouvrir le coffre au lancement |
+
+- Déverrouiller : mot de passe maître ou bouton **🙂 Windows Hello** (proposé automatiquement à l'ouverture de l'écran).
+- Après 3 mots de passe faux, attente croissante (2, 4, 8 … 60 s).
+- **Tout fermer** : 🔒 ▸ *Tout fermer et verrouiller le coffre*, ou le lien sous le formulaire de l'écran verrouillé (deux clics). Les sessions sont fermées et la clé est effacée de la mémoire.
+- *Écran + démarrage* garde la clé du coffre dans `%APPDATA%\KSTermus\hello.kst`, chiffrée par **DPAPI** (liée à ta session Windows) et libérée seulement après Hello. Changer le mot de passe maître met ce fichier à jour ; *Désactivé* le supprime.
+
+### Recherche dans le terminal
+
+`Ctrl+Shift+F` (ou préfixe `/`, ou la palette) ouvre une barre de recherche dans le panneau actif. Le texte sélectionné est repris automatiquement.
+
+- `Entrée` / `Maj+Entrée` : résultat suivant / précédent ; `Échap` ferme.
+- Options **Aa** (casse), **ab** (mot entier), **.\*** (expression régulière).
+- Toutes les occurrences sont surlignées, avec un compteur (`2/6`, `aucun`) et des repères dans la barre de défilement.
+- `Ctrl+F` seul reste envoyé au shell (bash, vim, less l'utilisent). Pour qu'il ouvre la recherche : **Paramètres ▸ Recherche dans le terminal**.
+
 ---
 
 ## Raccourcis clavier
@@ -230,6 +258,8 @@ La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la conne
 | Touche | Action |
 |---|---|
 | `Ctrl+Shift+P` | Palette de commandes |
+| `Ctrl+Shift+F` | Rechercher dans le terminal |
+| `Ctrl+Shift+L` | Verrouiller l'écran (sessions conservées) |
 | `Ctrl+T` | Nouvelle connexion (shell local ou host) |
 | `Ctrl+Shift+T` | Nouveau terminal local (shell par défaut) |
 | `Ctrl+B` puis … | Préfixe tmux (voir plus haut) |
@@ -260,7 +290,9 @@ La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la conne
 - **Aucune donnée affichée n'est interprétée comme HTML** (noms de fichiers SFTP, titres…), pour éviter les injections.
 - **Vérification des clés d'hôte** obligatoire (TOFU + alerte bloquante si l'empreinte change).
 - **sudo** : mot de passe uniquement sur stdin, `-k` systématique, fichier temporaire en `600`.
-- **Verrouillage** (🔒) : ferme toutes les sessions SSH, tunnels et terminaux locaux, puis efface la clé de la mémoire.
+- **Écran verrouillé** (`Ctrl+Shift+L`, inactivité, `Win+L`, veille) : sessions conservées, toutes les requêtes de l'interface refusées par le process principal sauf le déverrouillage, délai croissant après 3 échecs.
+- **Windows Hello** : vérification via l'API Windows `UserConsentVerifier`. Pour le démarrage, la clé du coffre est protégée par DPAPI : quelqu'un qui contrôle ta session Windows **et** passe Hello peut ouvrir le coffre. Garde *Écran verrouillé* seul si tu veux que le mot de passe maître reste obligatoire au lancement.
+- **Tout fermer et verrouiller** (🔒) : ferme toutes les sessions SSH, tunnels et terminaux locaux, puis efface la clé de la mémoire.
 
 ---
 
@@ -271,6 +303,7 @@ La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la conne
 | Application | `%LOCALAPPDATA%\Programs\KSTermus` |
 | Coffre chiffré | `%APPDATA%\KSTermus\vault.kst` |
 | Historique des éditions (chiffré) | `%APPDATA%\KSTermus\history\*.kst` |
+| Clé Windows Hello (DPAPI, optionnelle) | `%APPDATA%\KSTermus\hello.kst` |
 | Position / taille de la fenêtre | `%APPDATA%\KSTermus\window-state.json` |
 
 **Migrer vers un autre PC** : copie le dossier `%APPDATA%\KSTermus` (ou **Paramètres ▸ Exporter**), installe KSTermus, remets le dossier en place, puis déverrouille avec le même mot de passe maître.
@@ -304,6 +337,8 @@ src/
 │   ├── ssh-manager.js         Connexions SSH, shells, SFTP, tunnels L/R/SOCKS
 │   ├── remote-editor.js       Lecture / écriture de fichiers distants (SFTP ou sudo), conflits
 │   ├── local-pty.js           Terminaux locaux (ConPTY), détection des shells, sessions détachables
+│   ├── lock.js                Verrouillage d'écran : inactivité, filtrage IPC, anti force brute
+│   ├── hello.js               Windows Hello (WinRT via PowerShell) + clé DPAPI au démarrage
 │   ├── keys.js                Validation des clés privées, empreintes
 │   └── ssh-config.js          Import ~/.ssh/config
 ├── preload.js                 Pont sécurisé renderer ↔ main (contextBridge)
@@ -318,7 +353,7 @@ assets/                        icon.png, icon.ico, icon-1024.png
 test/run-tests.js              Tests d'intégration
 ```
 
-**Principales dépendances** : `electron`, `ssh2` (SSH/SFTP en JavaScript pur), `@xterm/xterm` (+ fit, web-links), `@lydell/node-pty` (PTY précompilé, ConPTY sous Windows), `codemirror` 5 (éditeur), `diff` (différences de l'historique), `electron-builder`, `resedit`.
+**Principales dépendances** : `electron`, `ssh2` (SSH/SFTP en JavaScript pur), `@xterm/xterm` (+ fit, web-links, search), `@lydell/node-pty` (PTY précompilé, ConPTY sous Windows), `codemirror` 5 (éditeur), `diff` (différences de l'historique), `electron-builder`, `resedit`.
 
 **Flux d'un terminal** : `xterm.js` (renderer) → IPC `ssh:write` → `SshManager` (canal SSH) ou `LocalManager` (PTY) → la sortie revient par l'IPC `term:data`, routée par identifiant de session vers le bon panneau.
 
@@ -336,7 +371,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-34 tests couvrent :
+38 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -345,7 +380,9 @@ KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 - **les tunnels** : -L, -R, SOCKS5, port déjà occupé, relance automatique après coupure ;
 - **le 2FA et les jump hosts** : OTP en 2 tours (mot de passe auto + code), mauvais code, annulation, 2 rebonds jusqu'à un serveur OTP, boucle détectée, bastion injoignable ;
 - **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
-- **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer.
+- **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer ;
+- **le verrouillage** : délai d'inactivité, IPC bloqués sauf déverrouillage, anti force brute, vérification du mot de passe, ouverture par clé ;
+- **Windows Hello** (simulé hors Windows) : disponibilité, vérification, annulation, Hello non configuré, clé du coffre jamais stockée en clair.
 
 L'interface a aussi été testée de bout en bout avec Playwright (Electron sous Xvfb).
 
@@ -374,6 +411,7 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 - Pas de synchronisation entre PC : migration manuelle du dossier `%APPDATA%\KSTermus`.
 - L'exécutable n'est pas signé : Windows SmartScreen peut afficher un avertissement au premier lancement.
 - Les blocs de commandes sont repérés au moment où tu valides une commande avec Entrée. Sans intégration au shell, une commande lancée autrement (historique du shell rappelé par un raccourci propre au shell, par exemple) peut ne pas être repérée.
+- Windows Hello : si la fenêtre de vérification s'ouvre derrière KSTermus, elle clignote dans la barre des tâches.
 - L'éditeur refuse les fichiers binaires et ceux de plus de 8 Mo.
 
 ---
@@ -382,6 +420,7 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 
 | Version | Contenu |
 |---|---|
+| **1.4.0** | Verrouillage d'écran (sessions conservées) : automatique après inactivité, avec Windows et en veille, `Ctrl+Shift+L` ; déverrouillage Windows Hello (écran, et au démarrage en option) ; recherche dans le terminal (`Ctrl+Shift+F`) ; version affichée sur l'écran de verrouillage ; badge d'authentification des cartes host mieux aligné |
 | **1.3.0** | 2FA / OTP (keyboard-interactive), jump hosts multi-rebonds (+ import ProxyJump), reconnexion automatique des terminaux SSH et des tunnels, distinction fin de session / coupure |
 | **1.2.2** | Presse-papiers : plus de double collage (Ctrl+Shift+V / Ctrl+V), une seule copie par sélection (plus de doublons dans Win+V), Ctrl+C copie si du texte est sélectionné, Ctrl+V colle sous Windows |
 | **1.2.1** | Éditeur : ouvrir un dossier (ex. `/opt/app/`) affiche un sélecteur de fichiers (SFTP ou sudo) avec création de fichier au lieu d'une erreur ; message d'erreur sudo nettoyé |

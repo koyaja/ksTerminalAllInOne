@@ -393,6 +393,88 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.strictEqual(lm.size, 0);
   });
 
+  console.log('Verrouillage et Windows Hello');
+  const { LockController, ALLOWED_WHEN_LOCKED } = require('../src/main/lock');
+  const { Hello, PS_CHECK, PS_VERIFY } = require('../src/main/hello');
+  await test('verrouillage auto après inactivité, IPC bloqués sauf déverrouillage', async () => {
+    let t = 0; const locks = [];
+    const lc = new LockController({ now: () => t, onLock: r => locks.push(r) });
+    lc.configure({ minutes: 15 });
+    t = 14 * 60000; assert.strictEqual(lc.tick(), false);
+    lc.activity();                       // activité à 14 min : repart de zéro
+    t = 28 * 60000; assert.strictEqual(lc.tick(), false);
+    t = 29 * 60000; assert.strictEqual(lc.tick(), true);
+    assert.deepStrictEqual(locks, ['inactivité']);
+    assert.strictEqual(lc.allowed('host:revealPassword'), false);
+    assert.strictEqual(lc.allowed('state:get'), false);
+    assert.ok(['vault:unlockScreen', 'hello:unlock', 'vault:status'].every(c => lc.allowed(c)));
+    assert.ok(!ALLOWED_WHEN_LOCKED.has('settings:save'));
+    lc.activity(); t = 60 * 60000; assert.strictEqual(lc.tick(), false, 'déjà verrouillé : pas de double verrou');
+    lc.unlock(); assert.strictEqual(lc.allowed('state:get'), true);
+    lc.configure({ minutes: 0 }); t = 1e9; assert.strictEqual(lc.tick(), false, '0 = jamais');
+  });
+  await test('anti force brute : délai après 3 échecs', async () => {
+    let t = 0; const lc = new LockController({ now: () => t });
+    lc.fail(); lc.fail(); lc.checkThrottle();
+    lc.fail(); assert.throws(() => lc.checkThrottle(), /réessaie dans 2 s/);
+    t = 2001; lc.checkThrottle();
+    lc.fail(); assert.throws(() => lc.checkThrottle(), /4 s/);
+    for (let i = 0; i < 10; i++) lc.fail();
+    assert.throws(() => lc.checkThrottle(), /60 s/);
+    lc.unlock(); lc.checkThrottle();
+  });
+  await test('coffre : vérification du mot de passe sans re-déchiffrer, ouverture par clé', async () => {
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-hello-'));
+    const v = new Vault(d2);
+    v.create('Maitre-Secret-1'); v.data.hosts.push({ id: 'h', label: 'x' }); v.save();
+    assert.strictEqual(v.verifyPassword('Maitre-Secret-1'), true);
+    assert.strictEqual(v.verifyPassword('mauvais-mdp'), false);
+    const key = Buffer.from(v.key);
+    v.lock();
+    const v2 = new Vault(d2);
+    v2.unlockWithKey(key);
+    assert.strictEqual(v2.data.hosts[0].label, 'x');
+    const bad = Buffer.alloc(32, 7);
+    assert.throws(() => new Vault(d2).unlockWithKey(bad), /périmée/);
+  });
+  await test('Windows Hello : disponibilité, vérification, clé DPAPI au démarrage', async () => {
+    const d3 = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-hello-'));
+    const fakeSafe = { isEncryptionAvailable: () => true,
+      encryptString: (s) => Buffer.from('DPAPI:' + Buffer.from(s).toString('hex')),
+      decryptString: (b) => Buffer.from(b.toString().slice(6), 'hex').toString() };
+    const calls = [];
+    let verifyResult = 'Verified';
+    const runner = async (script, env) => { calls.push([script === PS_CHECK ? 'check' : script === PS_VERIFY ? 'verify' : '?', env.KST_HELLO_MSG]); return script === PS_CHECK ? 'Available' : verifyResult; };
+    const hl = new Hello({ dir: d3, platform: 'win32', runner, safeStorage: fakeSafe });
+    assert.deepStrictEqual(await hl.available(), { ok: true });
+    await hl.available();
+    assert.strictEqual(calls.filter(c => c[0] === 'check').length, 1, 'disponibilité mise en cache');
+    assert.strictEqual(await hl.verify('Ouvrir'), true);
+    assert.deepStrictEqual(calls.at(-1), ['verify', 'Ouvrir']);
+    verifyResult = 'Canceled';
+    await assert.rejects(hl.verify(), /annulée/);
+    // Clé du coffre stockée chiffrée, jamais en clair
+    const key = Buffer.alloc(32, 9), salt = Buffer.alloc(16, 1);
+    hl.storeStartupKey(key, salt);
+    assert.ok(hl.hasStartupKey());
+    const rawFile = fs.readFileSync(path.join(d3, 'hello.kst'), 'utf8');
+    assert.ok(!rawFile.includes(key.toString('base64')), 'clé non stockée en clair');
+    assert.ok(hl.readStartupKey().key.equals(key));
+    hl.clearStartupKey(); assert.ok(!hl.hasStartupKey());
+    // Hors Windows : indisponible, sans lancer PowerShell
+    const lin = new Hello({ dir: d3, platform: 'linux', runner: async () => { throw new Error('ne doit pas être appelé'); } });
+    assert.strictEqual((await lin.available()).ok, false);
+    await assert.rejects(lin.verify(), /Windows uniquement/);
+    // Hello non configuré
+    const nc = new Hello({ dir: d3, platform: 'win32', runner: async () => 'NotConfiguredForUser' });
+    await assert.rejects(nc.verify(), /pas configuré/);
+  });
+  await test('script PowerShell Hello : backtick générique et types WinRT corrects', async () => {
+    assert.ok(PS_CHECK.includes("'IAsyncOperation`1'"));
+    assert.ok(PS_VERIFY.includes('RequestVerificationAsync($env:KST_HELLO_MSG)'));
+    assert.ok(PS_VERIFY.includes('ContentType=WindowsRuntime'));
+  });
+
   mgr.closeAll();
   srv.close();
   console.log(`\n${pass} réussi(s), ${failN} échec(s)`);

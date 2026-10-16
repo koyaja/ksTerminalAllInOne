@@ -20,7 +20,10 @@
       <label class="field" id="lock-pw2-wrap" hidden><span>Confirmer</span><input id="lock-pw2" type="password" minlength="8"></label>
       <p id="lock-error" class="error" hidden></p>
       <button id="lock-btn" class="btn primary wide" type="submit">Déverrouiller</button>
-      <p class="muted small">Les hosts, mots de passe et clés sont chiffrés (AES-256-GCM + scrypt). Sans ce mot de passe, rien n'est récupérable.</p>
+      <button id="lock-hello" class="btn wide hello-btn" type="button" hidden>🙂 Windows Hello</button>
+      <p id="lock-note" class="muted small">Les hosts, mots de passe et clés sont chiffrés (AES-256-GCM + scrypt). Sans ce mot de passe, rien n'est récupérable.</p>
+      <button id="lock-full" class="link-btn small" type="button" hidden>Fermer toutes les sessions et verrouiller le coffre</button>
+      <p id="lock-version" class="muted tiny"></p>
     </form>
   </section>
 
@@ -59,6 +62,7 @@
   <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="../../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <script src="../../node_modules/@xterm/addon-search/lib/addon-search.js"></script>
   <script src="../../node_modules/codemirror/lib/codemirror.js"></script>
   <script src="../../node_modules/codemirror/addon/dialog/dialog.js"></script>
   <script src="../../node_modules/codemirror/addon/search/searchcursor.js"></script>

@@ -74,6 +74,24 @@ class Vault {
     this.data = Object.assign(emptyData(), data);
   }
 
+  // Déverrouillage avec une clé déjà dérivée (Windows Hello au démarrage).
+  unlockWithKey(key) {
+    const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+    let data;
+    try { data = decrypt(Buffer.from(key), raw); } catch { throw new Error('Clé Windows Hello périmée — déverrouille avec le mot de passe maître'); }
+    this.salt = Buffer.from(raw.salt, 'base64');
+    this.key = Buffer.from(key);
+    this.data = Object.assign(emptyData(), data);
+  }
+
+  // Vérifie le mot de passe maître sans toucher à l'état (écran verrouillé).
+  verifyPassword(password) {
+    if (!this.key) throw new Error('Coffre verrouillé');
+    const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+    const k = deriveKey(String(password || ''), this.salt, raw.kdf);
+    return k.length === this.key.length && crypto.timingSafeEqual(k, this.key);
+  }
+
   changePassword(oldPw, newPw) {
     const probe = new Vault(path.dirname(this.file));
     probe.unlock(oldPw); // lève une erreur si l'ancien mot de passe est faux
