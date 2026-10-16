@@ -19,5 +19,6 @@ contextBridge.exposeInMainWorld('kst', {
   write: (sessionId, data) => ipcRenderer.send('ssh:write', { sessionId, data }),
   resize: (sessionId, cols, rows) => ipcRenderer.send('ssh:resize', { sessionId, cols, rows }),
   answerHostKey: (reqId, ok) => ipcRenderer.send('hostkey:answer', { reqId, ok }),
+  answerPrompt: (reqId, answers) => ipcRenderer.send('ssh:promptAnswer', { reqId, answers }),
   platform: process.platform
 });

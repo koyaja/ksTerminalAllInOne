@@ -361,3 +361,4 @@ body.prefix-on .pane.active { border-color: var(--warn) !important; }
 .picker-new { display: flex; gap: 8px; }
 .picker-new input { flex: 1; }
 .overlay-card.picker .actions { justify-content: flex-end; }
+.card-via { color: var(--info); font-size: 11.5px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

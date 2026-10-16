@@ -1,5 +1,5 @@
 'use strict';
-// Lecture minimale d'un fichier ~/.ssh/config (Host, HostName, User, Port, IdentityFile).
+// Lecture minimale d'un fichier ~/.ssh/config (Host, HostName, User, Port, IdentityFile, ProxyJump).
 function parseSshConfig(text) {
   const out = [];
   let cur = null;
@@ -14,7 +14,7 @@ function parseSshConfig(text) {
       cur = null;
       const alias = v.split(/\s+/)[0];
       if (/[*?!]/.test(alias)) continue; // motifs génériques ignorés
-      cur = { alias, hostname: alias, port: 22, username: '', identityFile: '' };
+      cur = { alias, hostname: alias, port: 22, username: '', identityFile: '', proxyJump: '' };
       out.push(cur);
     } else if (k === 'match') {
       cur = null;
@@ -23,6 +23,7 @@ function parseSshConfig(text) {
       else if (k === 'user') cur.username = v;
       else if (k === 'port') cur.port = Number(v) || 22;
       else if (k === 'identityfile' && !cur.identityFile) cur.identityFile = v;
+      else if (k === 'proxyjump' && v.toLowerCase() !== 'none') cur.proxyJump = v.split(',').pop().trim(); // dernier rebond = bastion direct
     }
   }
   return out;

@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.2.2**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.3.0**
 
 ---
 
@@ -40,7 +40,9 @@
 | Domaine | Ce que fait KSTermus |
 |---|---|
 | **Hosts** | Groupes, couleurs, recherche, duplication, commande au démarrage, import d'un fichier `~/.ssh/config` |
-| **Authentification** | Mot de passe, clé du keychain (avec passphrase), agent SSH (OpenSSH / Pageant), keyboard-interactive |
+| **Authentification** | Mot de passe, clé du keychain (avec passphrase), agent SSH (OpenSSH / Pageant), **2FA / OTP** (Google Authenticator, Duo…) |
+| **Jump host** | Connexion via un ou plusieurs bastions (ProxyJump), pour SSH, SFTP, éditeur et tunnels ; import de `ProxyJump` depuis `~/.ssh/config` |
+| **Reconnexion auto** | Après une coupure réseau ou une mise en veille : nouvel essai à 2, 4, 8, 15 puis 30 s, compte à rebours, tunnels relancés automatiquement |
 | **Terminal SSH** | Onglets, reconnexion en un clic, copie à la sélection (une seule écriture, au relâchement de la souris), liens cliquables, 10 000 lignes d'historique |
 | **Terminal local** | PowerShell 7, Windows PowerShell, cmd, Git Bash, distributions WSL (détection automatique) ; bash/zsh/fish sous Linux/macOS |
 | **Split** | Jusqu'à 8 panneaux par onglet, **mélange local + SSH**, séparateurs déplaçables, zoom d'un panneau, diffusion de la saisie |
@@ -99,6 +101,9 @@ npm start
 - **Double-clic** sur une carte ou bouton **SSH** : ouvre un terminal. **SFTP** : ouvre l'explorateur de fichiers.
 - **🔑** sur une carte : copie le mot de passe (effacé du presse-papiers après 30 s).
 - **Importer config** : lit un fichier `~/.ssh/config` (`Host`, `HostName`, `User`, `Port`, `IdentityFile`). Les clés non chiffrées sont ajoutées au keychain ; les hosts arrivent dans le groupe « Importés ».
+- **Passer par (jump host)** : choisis un autre host comme bastion. Le bastion peut lui-même passer par un autre (5 rebonds max., boucles détectées). La carte affiche `↪ via Bastion → …`. Tout passe par le bastion : terminal, SFTP, éditeur, tunnels.
+- **2FA / OTP** : si le serveur demande un code (PAM `google-authenticator`, Duo, etc.), une fenêtre affiche **la vraie question du serveur**. Le mot de passe enregistré est envoyé automatiquement, puis seul le code t'est demandé.
+- **Reconnexion automatique** (activable dans Paramètres) : si la connexion tombe (réseau, Wi-Fi, mise en veille, redémarrage du serveur), le panneau affiche un compte à rebours, puis réessaie à 2, 4, 8, 15 puis 30 s, 20 fois au maximum. Boutons **Reconnecter maintenant** et **Annuler**. Quand le réseau revient, la reconnexion est immédiate. Un `exit` volontaire ne déclenche **pas** de reconnexion.
 - À la **première connexion**, KSTermus affiche l'empreinte SHA-256 du serveur. Vérifie-la sur le serveur avec :
   ```bash
   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
@@ -211,6 +216,8 @@ Fonctionnement :
 | **Local (-L)** | `127.0.0.1:5433 → db:5432` via le serveur : accéder à une base privée depuis ton PC |
 | **Distant (-R)** | Le serveur écoute sur un port et renvoie vers ton PC (démo, webhook). `GatewayPorts` est requis pour écouter hors `127.0.0.1` |
 | **Dynamique (-D)** | Proxy **SOCKS5** local : configure ton navigateur sur `127.0.0.1:port` pour sortir par le serveur |
+
+Un tunnel coupé (et non arrêté par toi) est **relancé automatiquement** (2, 4, 8, 15 puis 30 s, 20 tentatives au maximum). Tu peux désactiver ce comportement tunnel par tunnel.
 
 ### Known hosts
 
@@ -329,13 +336,15 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-28 tests couvrent :
+34 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
 - **l'éditeur** : CRLF, conflit, permission refusée, dossier ouvert par erreur (sélecteur), sudo avec mot de passe, sudo NOPASSWD, mauvais mot de passe, droits et propriétaire conservés, mot de passe jamais écrit dans le fichier, fichier binaire refusé ;
 - **l'historique** : chiffrement et re-chiffrement ;
-- **les tunnels** : -L, -R, SOCKS5, port déjà occupé ;
+- **les tunnels** : -L, -R, SOCKS5, port déjà occupé, relance automatique après coupure ;
+- **le 2FA et les jump hosts** : OTP en 2 tours (mot de passe auto + code), mauvais code, annulation, 2 rebonds jusqu'à un serveur OTP, boucle détectée, bastion injoignable ;
+- **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer.
 
 L'interface a aussi été testée de bout en bout avec Playwright (Electron sous Xvfb).
@@ -373,6 +382,7 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 
 | Version | Contenu |
 |---|---|
+| **1.3.0** | 2FA / OTP (keyboard-interactive), jump hosts multi-rebonds (+ import ProxyJump), reconnexion automatique des terminaux SSH et des tunnels, distinction fin de session / coupure |
 | **1.2.2** | Presse-papiers : plus de double collage (Ctrl+Shift+V / Ctrl+V), une seule copie par sélection (plus de doublons dans Win+V), Ctrl+C copie si du texte est sélectionné, Ctrl+V colle sous Windows |
 | **1.2.1** | Éditeur : ouvrir un dossier (ex. `/opt/app/`) affiche un sélecteur de fichiers (SFTP ou sudo) avec création de fichier au lieu d'une erreur ; message d'erreur sudo nettoyé |
 | **1.2.0** | Terminaux locaux (PowerShell, cmd, WSL, Git Bash), panneaux mixtes local + SSH, préfixe tmux, sessions détachables, espaces de travail, palette de commandes, blocs de commandes, snippets paramétrés, éditeur distant (normal et sudo) avec conflits et CRLF, historique chiffré des éditions, afficher / copier les mots de passe |

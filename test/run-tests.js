@@ -280,6 +280,96 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     mgr.stopTunnel('fd');
   });
 
+  console.log('2FA, jump host, reconnexion');
+  // Serveur SSH de test « OTP » : mot de passe puis code de vérification (keyboard-interactive en 2 tours).
+  const { Server } = require('ssh2');
+  const otpKey = utils.generateKeyPairSync('ed25519').private;
+  const otpSrv = new Server({ hostKeys: [otpKey] }, (client) => {
+    client.on('authentication', (ctx) => {
+      if (ctx.method !== 'keyboard-interactive') return ctx.reject(['keyboard-interactive']);
+      ctx.prompt([{ prompt: 'Password: ', echo: false }], 'Connexion', '', (a1) => {
+        if (a1[0] !== 'otp-pass') return ctx.reject();
+        ctx.prompt([{ prompt: 'Verification code: ', echo: true }], 'Google Authenticator', 'Entrez le code à 6 chiffres', (a2) => a2[0] === '123456' ? ctx.accept() : ctx.reject());
+      });
+    }).on('ready', () => client.on('session', (accept) => {
+      const ses = accept();
+      ses.on('pty', (a) => a && a());
+      ses.on('shell', (a) => { const st = a(); st.write('OTP-SHELL-OK\r\n'); });
+    })).on('error', () => {});
+  });
+  await new Promise(r => otpSrv.listen(0, '127.0.0.1', r));
+  const otpPort = otpSrv.address().port;
+  vault.data.hosts.push({ id: 'otp', label: 'otp', hostname: '127.0.0.1', port: otpPort, username: 'u', auth: 'password', password: 'otp-pass' });
+
+  await test('2FA : mot de passe rempli automatiquement, code OTP demandé à l\'utilisateur', async () => {
+    const asked = [];
+    mgr.bridge.askPrompts = async (info) => { asked.push(info); return ['123456']; };
+    const c = await mgr.connect('otp');
+    c.end();
+    assert.strictEqual(asked.length, 1, 'une seule question posée (le code)');
+    assert.ok(/Verification code/.test(asked[0].prompts[0].prompt));
+    assert.strictEqual(asked[0].instructions, 'Entrez le code à 6 chiffres');
+  });
+  await test('2FA : mauvais code ou annulation → authentification refusée', async () => {
+    mgr.bridge.askPrompts = async () => ['000000'];
+    await assert.rejects(mgr.connect('otp'), /Authentification refusée/);
+    mgr.bridge.askPrompts = async () => null;
+    await assert.rejects(mgr.connect('otp'), /Authentification refusée/);
+  });
+  await test('jump host : cible joignable uniquement via un bastion (2 rebonds + 2FA au bout)', async () => {
+    mgr.bridge.askPrompts = async () => ['123456'];
+    vault.data.hosts.push({ id: 'bastion2', label: 'bastion2', hostname: H, port: P, username: U, auth: 'password', password: PW, jumpHostId: 'h1' });
+    vault.data.hosts.push({ id: 'otp-via', label: 'otp-via', hostname: '127.0.0.1', port: otpPort, username: 'u', auth: 'password', password: 'otp-pass', jumpHostId: 'bastion2' });
+    const c = await mgr.connect('otp-via');
+    assert.ok(c.jumpConn && c.jumpConn.jumpConn, 'deux connexions bastion en chaîne');
+    const out = await new Promise((res, rej) => c.shell((e, st) => { if (e) return rej(e); st.once('data', d => res(String(d))); }));
+    assert.ok(out.includes('OTP-SHELL-OK'));
+    let jumpClosed = false; c.jumpConn.on('close', () => { jumpClosed = true; });
+    c.end(); await sleep(400);
+    assert.ok(jumpClosed, 'fermer la cible ferme aussi le bastion');
+  });
+  await test('jump host : boucle détectée, bastion injoignable → message clair', async () => {
+    vault.data.hosts.push({ id: 'la', label: 'A', hostname: H, port: P, username: U, password: PW, jumpHostId: 'lb' });
+    vault.data.hosts.push({ id: 'lb', label: 'B', hostname: H, port: P, username: U, password: PW, jumpHostId: 'la' });
+    await assert.rejects(mgr.connect('la'), /Boucle de jump hosts/);
+    vault.data.hosts.push({ id: 'dead', label: 'mort', hostname: '127.0.0.1', port: 1, username: U, password: PW });
+    vault.data.hosts.push({ id: 'behind', label: 'derrière', hostname: '10.255.255.1', port: 22, username: U, password: PW, jumpHostId: 'dead' });
+    await assert.rejects(mgr.connect('behind'), /Jump host « mort »/);
+  });
+  await test('shell : « exit » = fin propre, coupure réseau = fin non propre', async () => {
+    const ex = [];
+    const emitBak = mgr.bridge.emit;
+    mgr.bridge.emit = (c, p) => { if (c === 'term:exit') ex.push(p); };
+    await mgr.openShell('cl1', 'h1', 80, 24);
+    mgr.write('cl1', 'exit\n');
+    for (let i = 0; i < 40 && !ex.length; i++) await sleep(100);
+    assert.strictEqual(ex[0].clean, true, 'exit volontaire → clean');
+    await mgr.openShell('cl2', 'h1', 80, 24);
+    await sleep(300);
+    mgr.sessions.get('cl2').conn._sock.destroy(); // coupure brutale du TCP
+    for (let i = 0; i < 40 && ex.length < 2; i++) await sleep(100);
+    assert.strictEqual(ex[1].clean, false, 'coupure → non clean (reconnexion auto)');
+    mgr.bridge.emit = emitBak;
+  });
+  await test('tunnel : relancé automatiquement après une coupure', async () => {
+    const tp = await new Promise(r => { const s0 = net.createServer().listen(0, '127.0.0.1', () => { const p0 = s0.address().port; s0.close(() => r(p0)); }); });
+    const srvT = http.createServer((q, res) => res.end('tunnel-ok')).listen(0, '127.0.0.1');
+    await new Promise(r => srvT.once('listening', r));
+    vault.data.forwards.push({ id: 'fauto', type: 'L', hostId: 'h1', bindHost: '127.0.0.1', bindPort: tp, destHost: '127.0.0.1', destPort: srvT.address().port });
+    await mgr.startTunnel('fauto');
+    mgr.tunnels.get('fauto').conn._sock.destroy();
+    await sleep(500);
+    assert.ok(mgr.tunnelStatus().fauto.reconnecting, 'en cours de reconnexion');
+    for (let i = 0; i < 60 && !(mgr.tunnelStatus().fauto || {}).active; i++) await sleep(100);
+    assert.ok(mgr.tunnelStatus().fauto.active, 'tunnel rétabli');
+    const body = await new Promise((res, rej) => http.get({ host: '127.0.0.1', port: tp, path: '/' }, r => { let b = ''; r.on('data', d => b += d); r.on('end', () => res(b)); }).on('error', rej));
+    assert.strictEqual(body, 'tunnel-ok');
+    mgr.stopTunnel('fauto');
+    assert.ok(!mgr.tunnelStatus().fauto, 'arrêt manuel = pas de relance');
+    srvT.close();
+  });
+  otpSrv.close();
+
   console.log('Terminaux locaux');
   const { LocalManager } = require('../src/main/local-pty');
   await test('shell local : spawn, sortie, détacher (tampon), rattacher, terminer', async () => {

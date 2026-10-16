@@ -16,10 +16,19 @@ const { parsePrivateKey } = require('./keys');
 const vault = new Vault(app.getPath('userData'));
 let win = null;
 const pendingHostKeys = new Map();
+const pendingPrompts = new Map();
 
 const manager = new SshManager({
   vault,
   emit: (channel, payload) => { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); },
+  // Questions keyboard-interactive (2FA / OTP…) posées à l'utilisateur ; null = annulé.
+  askPrompts: (info) => new Promise(resolve => {
+    const reqId = crypto.randomUUID();
+    pendingPrompts.set(reqId, resolve);
+    if (win && !win.isDestroyed()) win.webContents.send('ssh:prompt', { reqId, ...info });
+    else resolve(null);
+    setTimeout(() => { if (pendingPrompts.has(reqId)) { pendingPrompts.delete(reqId); resolve(null); if (win && !win.isDestroyed()) win.webContents.send('ssh:promptCancel', { reqId }); } }, 5 * 60 * 1000);
+  }),
   askHostKey: (info) => new Promise(resolve => {
     const reqId = crypto.randomUUID();
     pendingHostKeys.set(reqId, resolve);
@@ -90,6 +99,7 @@ handle('host:save', (input) => {
     auth: input.auth || 'password',
     keyId: input.auth === 'key' ? input.keyId || null : null,
     startupCommand: input.startupCommand || '',
+    jumpHostId: input.jumpHostId || null,
     color: input.color || '',
     notes: input.notes || '',
     password: existing ? existing.password : '',
@@ -100,12 +110,27 @@ handle('host:save', (input) => {
   if (typeof input.sudoPassword === 'string' && input.sudoPassword !== '') host.sudoPassword = input.sudoPassword;
   if (input.clearSudoPassword) host.sudoPassword = '';
   if (host.auth === 'key' && !d.keys.some(k => k.id === host.keyId)) throw new Error('Choisis une clé du keychain');
+  if (host.jumpHostId) {
+    if (host.jumpHostId === host.id) throw new Error('Un host ne peut pas être son propre jump host');
+    // Détection de boucle (A → B → A)
+    const seen = new Set([host.id]);
+    let cur = host.jumpHostId;
+    while (cur) {
+      if (seen.has(cur)) throw new Error('Boucle de jump hosts détectée');
+      seen.add(cur);
+      const h = d.hosts.find(x => x.id === cur);
+      if (!h) throw new Error('Jump host introuvable');
+      cur = h.jumpHostId;
+    }
+  }
   if (existing) Object.assign(existing, host); else d.hosts.push(host);
   vault.save();
   return publicState();
 });
 handle('host:delete', (id) => {
   const d = requireUnlocked();
+  const users = d.hosts.filter(h => h.jumpHostId === id).map(h => h.label);
+  if (users.length) throw new Error('Ce host sert de jump host à : ' + users.join(', '));
   d.hosts = d.hosts.filter(h => h.id !== id);
   d.forwards = d.forwards.filter(f => f.hostId !== id);
   vault.save();
@@ -118,6 +143,7 @@ handle('host:importSshConfig', async () => {
   if (r.canceled || !r.filePaths[0]) return { added: 0, state: publicState() };
   const entries = parseSshConfig(fs.readFileSync(r.filePaths[0], 'utf8'));
   let added = 0;
+  const importedIds = new Map();
   for (const e of entries) {
     if (d.hosts.some(h => h.hostname === e.hostname && h.username === e.username && h.port === e.port)) continue;
     let keyId = null;
@@ -134,12 +160,24 @@ handle('host:importSshConfig', async () => {
         keyId = k.id;
       } catch { /* clé chiffrée ou illisible : on garde l'auth par mot de passe */ }
     }
+    const newId = uid();
+    importedIds.set(e.alias, { id: newId, proxyJump: e.proxyJump });
     d.hosts.push({
-      id: uid(), label: e.alias, group: 'Importés', hostname: e.hostname, port: e.port,
+      id: newId, label: e.alias, group: 'Importés', hostname: e.hostname, port: e.port,
       username: e.username || os.userInfo().username, auth: keyId ? 'key' : 'password', keyId,
       startupCommand: '', color: '', notes: '', password: ''
     });
     added++;
+  }
+  // ProxyJump : relie chaque host importé à son bastion (alias importé, ou host existant de même nom / adresse).
+  for (const [, v] of importedIds) {
+    if (!v.proxyJump) continue;
+    const m = v.proxyJump.match(/^(?:([^@]+)@)?([^:]+)(?::(\d+))?$/);
+    const alias = m ? m[2] : v.proxyJump;
+    const target = (importedIds.get(v.proxyJump) && d.hosts.find(h => h.id === importedIds.get(v.proxyJump).id))
+      || d.hosts.find(h => h.label === alias || h.hostname === alias);
+    const h = d.hosts.find(x => x.id === v.id);
+    if (target && h && target.id !== h.id) h.jumpHostId = target.id;
   }
   vault.save();
   return { added, state: publicState() };
@@ -220,7 +258,8 @@ handle('forward:save', (f) => {
   const item = {
     id: existing ? existing.id : uid(), label: f.label || '', type: f.type, hostId: f.hostId,
     bindHost: f.bindHost || '127.0.0.1', bindPort,
-    destHost: f.type === 'D' ? '' : f.destHost, destPort: f.type === 'D' ? 0 : Number(f.destPort)
+    destHost: f.type === 'D' ? '' : f.destHost, destPort: f.type === 'D' ? 0 : Number(f.destPort),
+    autoReconnect: f.autoReconnect !== false
   };
   if (existing) Object.assign(existing, item); else d.forwards.push(item);
   vault.save();
@@ -232,6 +271,10 @@ handle('tunnel:stop', (id) => { manager.stopTunnel(id); return true; });
 
 // ----- Known hosts -----
 handle('knownhost:delete', (k) => { const d = requireUnlocked(); delete d.knownHosts[k]; vault.save(); return publicState(); });
+ipcMain.on('ssh:promptAnswer', (_e, { reqId, answers }) => {
+  const r = pendingPrompts.get(reqId);
+  if (r) { pendingPrompts.delete(reqId); r(Array.isArray(answers) ? answers.map(a => String(a ?? '')) : null); }
+});
 ipcMain.on('hostkey:answer', (_e, { reqId, ok }) => {
   const r = pendingHostKeys.get(reqId);
   if (r) { pendingHostKeys.delete(reqId); r(!!ok); }

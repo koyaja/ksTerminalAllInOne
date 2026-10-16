@@ -250,6 +250,13 @@
     ]), !list.length ? h('div', { class: 'empty', text: 'Aucun résultat.' }) : null);
   }
 
+  function jumpChain(x) {
+    const out = []; const seen = new Set([x.id]);
+    let cur = x.jumpHostId && hostById(x.jumpHostId);
+    while (cur && !seen.has(cur.id)) { out.unshift(cur.label); seen.add(cur.id); cur = cur.jumpHostId && hostById(cur.jumpHostId); }
+    return out;
+  }
+
   function hostCard(x) {
     const authLabel = { password: 'mot de passe', key: 'clé', agent: 'agent' }[x.auth] || x.auth;
     const card = h('div', { class: 'card', ondblclick: () => openTerminal(x.id) },
@@ -257,7 +264,8 @@
         h('div', { class: 'avatar', style: { background: x.color || COLORS[0] }, text: initials(x.label) }),
         h('div', { style: { minWidth: 0, flex: 1 } },
           h('div', { class: 'card-title', text: x.label }),
-          h('div', { class: 'card-sub', text: `${x.username}@${x.hostname}${x.port !== 22 ? ':' + x.port : ''}` }))),
+          h('div', { class: 'card-sub', text: `${x.username}@${x.hostname}${x.port !== 22 ? ':' + x.port : ''}` }),
+          x.jumpHostId && hostById(x.jumpHostId) ? h('div', { class: 'card-via', title: 'Connexion via un jump host', text: `↪ via ${jumpChain(x).join(' → ')}` }) : null)),
       h('div', { class: 'card-actions' },
         h('button', { class: 'btn primary sm', onclick: (e) => { e.stopPropagation(); openTerminal(x.id); } }, 'SSH'),
         h('button', { class: 'btn sm', onclick: (e) => { e.stopPropagation(); openSftp(x.id); } }, 'SFTP'),
@@ -299,9 +307,12 @@
       sudoPassword: h('input', { type: 'password', placeholder: x.hasSudoPassword ? '•••••• (enregistré)' : 'Vide = même que le mot de passe SSH', autocomplete: 'off' }),
       clearSudo: h('input', { type: 'checkbox' }),
       keyId: h('select', {}, S.keys.length ? S.keys.map(k => h('option', { value: k.id, text: `${k.label} (${k.type})` })) : h('option', { value: '', text: 'Aucune clé — ajoute-en une dans Keychain' })),
-      startup: h('input', { value: x.startupCommand || '', placeholder: 'ex. cd /var/www && ls' })
+      startup: h('input', { value: x.startupCommand || '', placeholder: 'ex. cd /var/www && ls' }),
+      jump: h('select', {}, h('option', { value: '', text: 'Connexion directe' }),
+        S.hosts.filter(z => z.id !== x.id).sort((a, b) => a.label.localeCompare(b.label)).map(z => h('option', { value: z.id, text: `${z.label} (${z.username}@${z.hostname})` })))
     };
     f.auth.value = x.auth || 'password';
+    f.jump.value = x.jumpHostId && S.hosts.some(z => z.id === x.jumpHostId) ? x.jumpHostId : '';
     if (x.keyId) f.keyId.value = x.keyId;
     let color = x.color || COLORS[0];
     const swatches = h('div', { class: 'swatches' }, COLORS.map(c => {
@@ -333,6 +344,7 @@
         field('Utilisateur', f.username),
         field('Authentification', f.auth), keyWrap, pwWrap, clearWrap,
         sudoWrap, clearSudoWrap,
+        field('Passer par (jump host / bastion)', f.jump, 'La connexion passe d\'abord par ce serveur, qui peut lui-même passer par un autre (plusieurs rebonds).'),
         field('Commande au démarrage', f.startup),
         field('Couleur', swatches)],
       actions: [{ label: 'Annuler', value: false }, {
@@ -341,7 +353,8 @@
             id: x.id || null, label: f.label.value, group: f.group.value, hostname: f.hostname.value,
             port: f.port.value, username: f.username.value, auth: f.auth.value, keyId: f.keyId.value,
             password: f.password.value, clearPassword: f.clear.checked,
-            sudoPassword: f.sudoPassword.value, clearSudoPassword: f.clearSudo.checked, startupCommand: f.startup.value, color
+            sudoPassword: f.sudoPassword.value, clearSudoPassword: f.clearSudo.checked, startupCommand: f.startup.value, color,
+            jumpHostId: f.jump.value || null
           }));
           if (!s) return false;
           setState(s); return true;
@@ -506,14 +519,18 @@
     return h('div', {},
       h('div', { class: 'section-head' }, h('h1', { text: 'Port forwarding' }), h('button', { class: 'btn primary', onclick: () => editForward() }, '+ Nouveau tunnel')),
       S.forwards.length ? h('div', { class: 'list' }, S.forwards.map(f => {
-        const active = !!(S.tunnels && S.tunnels[f.id]);
+        const st = S.tunnels && S.tunnels[f.id];
+        const active = !!(st && st.active);
+        const retrying = !!(st && st.reconnecting);
         return h('div', { class: 'row' },
-          h('span', { class: 'dot ' + (active ? 'on' : '') }),
+          h('span', { class: 'dot ' + (active ? 'on' : retrying ? 'wait' : '') }),
           h('div', { class: 'row-main' },
-            h('div', { class: 'row-title' }, f.label || typeName[f.type], h('span', { class: 'badge ' + f.type, text: typeName[f.type] })),
+            h('div', { class: 'row-title' }, f.label || typeName[f.type], h('span', { class: 'badge ' + f.type, text: typeName[f.type] }),
+              retrying ? h('span', { class: 'badge R', text: `reconnexion… (tentative ${st.attempt})` }) : null,
+              f.autoReconnect === false ? h('span', { class: 'badge', text: 'sans relance auto' }) : null),
             h('div', { class: 'row-sub', text: forwardDesc(f) })),
           h('div', { class: 'row-actions' },
-            active ? h('button', { class: 'btn sm', onclick: async () => { await guard(() => api.invoke('tunnel:stop', f.id)); refresh(); } }, 'Arrêter')
+            (active || retrying) ? h('button', { class: 'btn sm', onclick: async () => { await guard(() => api.invoke('tunnel:stop', f.id)); refresh(); } }, 'Arrêter')
               : h('button', { class: 'btn primary sm', onclick: async (e) => {
                 e.target.disabled = true; e.target.textContent = 'Connexion…';
                 const ok = await guard(() => api.invoke('tunnel:start', f.id));
@@ -542,6 +559,7 @@
     const bindRow = h('div', { class: 'form-row' }, h('label', { class: 'field' }, bindLbl, bindHost), h('label', { class: 'field narrow' }, h('span', { text: 'Port' }), bindPort));
     const destRow = h('div', { class: 'form-row' }, h('label', { class: 'field' }, destLbl, destHost), h('label', { class: 'field narrow' }, h('span', { text: 'Port' }), destPort));
     const help = h('div', { class: 'callout small' });
+    const autoRc = h('input', { type: 'checkbox' }); autoRc.checked = f.autoReconnect !== false;
     const sync = () => {
       const t = type.value;
       bindLbl.textContent = t === 'R' ? 'Écoute sur le serveur' : 'Écoute locale';
@@ -554,9 +572,10 @@
     type.addEventListener('change', sync); sync();
     return modal({
       title: f.id ? 'Modifier le tunnel' : 'Nouveau tunnel',
-      body: [h('div', { class: 'form-row' }, field('Nom', label), field('Type', type)), field('Via le host', host), bindRow, destRow, help],
+      body: [h('div', { class: 'form-row' }, field('Nom', label), field('Type', type)), field('Via le host', host), bindRow, destRow, help,
+        h('label', { class: 'check' }, autoRc, 'Relancer automatiquement si la connexion tombe')],
       actions: [{ label: 'Annuler', value: false }, { label: 'Enregistrer', class: 'primary', submit: true, onClick: async () => {
-        const s = await guard(() => api.invoke('forward:save', { id: f.id, label: label.value, type: type.value, hostId: host.value, bindHost: bindHost.value, bindPort: bindPort.value, destHost: destHost.value, destPort: destPort.value }));
+        const s = await guard(() => api.invoke('forward:save', { id: f.id, label: label.value, type: type.value, hostId: host.value, bindHost: bindHost.value, bindPort: bindPort.value, destHost: destHost.value, destPort: destPort.value, autoReconnect: autoRc.checked }));
         if (!s) return false; setState(s); return true;
       } }]
     });
@@ -586,6 +605,9 @@
       h('div', { class: 'section-head' }, h('h1', { text: 'Paramètres' })),
       h('div', { class: 'list' },
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Taille de police du terminal' })), h('div', { style: { width: '90px' } }, fs)),
+        h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Reconnexion automatique SSH' }), h('div', { class: 'muted small', text: 'Après une coupure réseau ou une mise en veille : nouvel essai à 2, 4, 8, 15 puis 30 s.' })),
+          (() => { const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' } }); c.checked = S.settings.autoReconnect !== false;
+            c.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoReconnect: c.checked })); if (s) S = s; }); return c; })()),
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Préfixe façon tmux' }), h('div', { class: 'muted small', text: 'Touche à presser avant une commande de panneau (préfixe puis ? pour l\'aide).' })),
           (() => { const sel = h('select', { style: { width: '150px' } }, [['ctrl+b', 'Ctrl+B (tmux)'], ['ctrl+a', 'Ctrl+A (screen)'], ['off', 'Désactivé']].map(([v, l]) => h('option', { value: v, text: l })));
             sel.value = prefixKey(); sel.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { tmuxPrefix: sel.value })); if (s) { S = s; toast('Préfixe : ' + sel.options[sel.selectedIndex].text); } }); return sel; })()),
@@ -696,6 +718,7 @@
 
   function disposePane(p, opts = {}) {
     panes.delete(p.id);
+    if (p.dispose) p.dispose();
     if (p.ro) p.ro.disconnect();
     p.term.dispose();
     p.el.remove();
@@ -1007,9 +1030,38 @@
     el.addEventListener('mousedown', () => setActivePane(t, id), true);
     term.textarea && term.textarea.addEventListener('focus', () => setActivePane(t, id));
 
-    p.connect = async () => {
+    p.retry = { attempt: 0, timer: null, tick: null };
+    const clearRetry = () => { clearTimeout(p.retry.timer); clearInterval(p.retry.tick); p.retry.timer = p.retry.tick = null; };
+    const FATAL = /Authentification refusée|Clé d'hôte refusée|Boucle de jump|n'existe plus|Trop de rebonds|Coffre verrouillé/;
+    // Reconnexion automatique : 2 s, 4 s, 8 s, 15 s puis toutes les 30 s (20 tentatives max).
+    const scheduleReconnect = (reason) => {
+      clearRetry();
+      p.retry.attempt++;
+      if (p.retry.attempt > 20) { p.retry.attempt = 0; showDisconnected(`${reason} — abandon après 20 tentatives`); return; }
+      let left = [2, 4, 8, 15, 30][Math.min(p.retry.attempt - 1, 4)];
       setPaneStatus('wait');
-      overlay(wrap, [h('div', { class: 'spinner' }), h('div', { text: isLocal ? `Démarrage de ${title0}…` : `Connexion à ${host.username}@${host.hostname}…` })]);
+      const label = h('div', { class: 'muted' });
+      const upd = () => { label.textContent = `Reconnexion dans ${left} s · tentative ${p.retry.attempt}/20`; };
+      upd();
+      overlay(wrap, [
+        h('div', { class: 'spinner' }),
+        h('div', { style: { fontWeight: 600 }, text: 'Connexion perdue' }),
+        h('div', { class: 'muted small', text: reason || '' }), label,
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn primary', onclick: () => { clearRetry(); p.connect({ auto: true }); } }, 'Reconnecter maintenant'),
+          h('button', { class: 'btn', onclick: () => { clearRetry(); p.retry.attempt = 0; setPaneStatus('off'); showDisconnected(reason); } }, 'Annuler'))
+      ]);
+      p.retry.tick = setInterval(() => { left = Math.max(0, left - 1); upd(); }, 1000);
+      p.retry.timer = setTimeout(() => { clearRetry(); p.connect({ auto: true }); }, left * 1000);
+    };
+    p.retryNow = () => { if (p.retry.timer) { clearRetry(); p.connect({ auto: true }); } };
+    p.dispose = () => clearRetry();
+
+    p.connect = async (opts = {}) => {
+      clearRetry();
+      setPaneStatus('wait');
+      if (opts.auto) term.write(`\r\n\x1b[90m--- reconnexion automatique (tentative ${p.retry.attempt}) ---\x1b[0m\r\n`);
+      overlay(wrap, [h('div', { class: 'spinner' }), h('div', { text: isLocal ? `Démarrage de ${title0}…` : `Connexion à ${host.username}@${host.hostname}${host.jumpHostId && hostById(host.jumpHostId) ? ' via ' + hostById(host.jumpHostId).label : ''}…` })]);
       await new Promise(r => requestAnimationFrame(r));
       try { fitAddon.fit(); } catch { /* ignore */ }
       try {
@@ -1031,12 +1083,17 @@
         p.cols = term.cols; p.rows = term.rows;
         overlay(wrap, null);
         setPaneStatus('on');
+        if (opts.auto) toast(`✓ ${title0} reconnecté`);
+        p.retry.attempt = 0;
         p.fit();
         if (t.activePane === id && ui.activeTab === t.id) term.focus();
       } catch (e) {
         if (!panes.has(id)) return;
+        const msg = e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+        if (opts.auto && !isLocal && !FATAL.test(msg)) { scheduleReconnect(msg); return; }
+        p.retry.attempt = 0;
         setPaneStatus('off');
-        showDisconnected(e.message);
+        showDisconnected(msg);
       }
     };
     const showDisconnected = (reason) => overlay(wrap, [
@@ -1051,7 +1108,11 @@
         } }, isLocal ? 'Relancer' : 'Reconnecter'),
         h('button', { class: 'btn', onclick: () => closePane(t, id) }, 'Fermer'))
     ]);
-    p.onExit = (reason) => { setPaneStatus('off'); showDisconnected(reason); };
+    p.onExit = (reason, clean) => {
+      // Coupure réseau / serveur injoignable → reconnexion automatique ; « exit » volontaire → on s'arrête.
+      if (!isLocal && !clean && S.settings.autoReconnect !== false) { scheduleReconnect(reason); return; }
+      setPaneStatus('off'); showDisconnected(reason);
+    };
     return p;
   }
 
@@ -1282,7 +1343,9 @@
   }
 
   api.on('term:data', ({ sessionId, data }) => { const p = panes.get(sessionId); if (p) p.term.write(data); });
-  api.on('term:exit', ({ sessionId, reason }) => { const p = panes.get(sessionId); if (p && p.onExit) p.onExit(reason); });
+  api.on('term:exit', ({ sessionId, reason, clean }) => { const p = panes.get(sessionId); if (p && p.onExit) p.onExit(reason, clean); });
+  // Le réseau revient : on retente tout de suite les panneaux en attente de reconnexion.
+  window.addEventListener('online', () => { for (const p of panes.values()) if (p.retryNow) p.retryNow(); });
 
   // ---------- Local : shells, sessions détachées, espaces de travail ----------
   async function refreshLocalSessions() {
@@ -2028,13 +2091,48 @@
     if (fn) fn(done, total);
   });
   api.on('sftp:closed', ({ sessionId }) => { const t = tabs.get(sessionId); if (t) { setStatus(t, 'off'); toast(`SFTP ${t.title} : connexion fermée`, true); } });
-  api.on('tunnel:status', ({ forwardId, active, reason }) => {
-    if (!active && reason && reason !== 'Arrêté') {
-      const f = S && S.forwards.find(x => x.id === forwardId);
-      toast(`Tunnel ${f ? (f.label || forwardDesc(f)) : ''} coupé : ${reason}`, true);
-    }
+  api.on('tunnel:status', ({ forwardId, active, reason, reconnecting, attempt, delay }) => {
+    const f = S && S.forwards.find(x => x.id === forwardId);
+    const name = f ? (f.label || forwardDesc(f)) : '';
+    if (reconnecting && attempt === 1) toast(`Tunnel ${name} coupé (${reason}) — reconnexion automatique…`, true);
+    else if (active && reason && /^Rétabli/.test(reason)) toast(`✓ Tunnel ${name} rétabli`);
+    else if (!active && !reconnecting && reason && reason !== 'Arrêté') toast(`Tunnel ${name} coupé : ${reason}`, true);
     if (S) refresh();
   });
+
+  // ---------- Questions du serveur (2FA / OTP / keyboard-interactive) ----------
+  api.on('ssh:prompt', (info) => {
+    const fields = info.prompts.map((pr, i) => {
+      const inp = h('input', { type: pr.echo ? 'text' : 'password', autocomplete: 'one-time-code', inputmode: /code|otp|token|vérif|verif/i.test(pr.prompt) ? 'numeric' : null });
+      let useStored = null;
+      if (pr.prefill === 'stored') {
+        useStored = h('input', { type: 'checkbox' }); useStored.checked = true;
+        inp.placeholder = 'mot de passe enregistré';
+        inp.disabled = true;
+        useStored.addEventListener('change', () => { inp.disabled = useStored.checked; if (!useStored.checked) inp.focus(); });
+      }
+      const label = (pr.prompt || `Question ${i + 1}`).replace(/:\s*$/, '');
+      return { inp, useStored, el: h('div', {}, field(label, pr.echo ? inp : secretInput(inp, { copy: false })),
+        useStored ? h('label', { class: 'check small' }, useStored, 'Utiliser le mot de passe enregistré') : null) };
+    });
+    modal({
+      title: '🔐 Vérification demandée par le serveur',
+      body: [
+        h('p', { text: `${info.label} (${info.host})` }),
+        info.name ? h('div', { class: 'muted small', text: info.name }) : null,
+        info.instructions ? h('div', { class: 'callout small', text: info.instructions }) : null,
+        ...fields.map(f => f.el),
+        h('div', { class: 'muted small', text: 'Code de ton application d\'authentification (Google Authenticator, Authy…) ou autre information demandée par le serveur.' })
+      ],
+      onOpen: (form) => {
+        const bd = form.closest('.backdrop'); if (bd) bd.dataset.req = info.reqId;
+        const first = fields.find(f => !f.inp.disabled);
+        if (first) setTimeout(() => first.inp.focus(), 60);
+      },
+      actions: [{ label: 'Annuler', value: false }, { label: 'Valider', class: 'primary', submit: true, onClick: () => fields.map(f => f.useStored && f.useStored.checked ? '\u0000stored' : f.inp.value) }]
+    }).then(ans => api.answerPrompt(info.reqId, ans || null));
+  });
+  api.on('ssh:promptCancel', ({ reqId }) => { const bd = document.querySelector(`.backdrop[data-req="${reqId}"]`); if (bd) bd.remove(); });
 
   // ---------- Vérification de clé d'hôte ----------
   api.on('hostkey:ask', (info) => {

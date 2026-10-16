@@ -69,16 +69,41 @@ class SshManager {
   }
 
   // Ouvre une connexion SSH authentifiée avec vérification de la clé d'hôte (TOFU).
-  connect(hostId) {
+  // - jump host : si le host a un « jumpHostId », on se connecte d'abord au bastion (récursivement,
+  //   donc plusieurs rebonds possibles) puis on ouvre un canal direct-tcpip vers la cible ;
+  // - 2FA : les questions keyboard-interactive du serveur (code OTP…) sont posées à l'utilisateur ;
+  //   seules les questions de type « mot de passe » sont remplies automatiquement, une fois.
+  async connect(hostId, chain = []) {
     const host = this.hostById(hostId);
+    if (chain.includes(hostId)) throw new Error('Boucle de jump hosts : ' + [...chain, hostId].map(id => this.hostById(id).label).join(' → '));
+    if (chain.length >= 5) throw new Error('Trop de rebonds (5 max.)');
     const cfg = this.buildConfig(host);
     const hostKeyId = `${cfg.host}:${cfg.port}`;
     const vault = this.bridge.vault;
 
+    let jumpConn = null;
+    if (host.jumpHostId) {
+      if (!vault.data.hosts.some(h => h.id === host.jumpHostId)) throw new Error('Le jump host de « ' + host.label + ' » n\'existe plus');
+      const jump = this.hostById(host.jumpHostId);
+      try { jumpConn = await this.connect(host.jumpHostId, [...chain, hostId]); }
+      catch (e) { throw new Error(`Jump host « ${jump.label} » : ${e.message}`); }
+      try {
+        cfg.sock = await new Promise((res, rej) => jumpConn.forwardOut('127.0.0.1', 0, cfg.host, cfg.port, (e, st) => e ? rej(e) : res(st)));
+      } catch (e) {
+        jumpConn.end();
+        throw new Error(`Le jump host « ${jump.label} » ne peut pas joindre ${cfg.host}:${cfg.port} (${e.message})`);
+      }
+    }
+
     return new Promise((resolve, reject) => {
       const conn = new Client();
       let settled = false;
-      const fail = (err) => { if (!settled) { settled = true; reject(err); } conn.end(); };
+      const fail = (err) => { if (!settled) { settled = true; reject(err); } conn.end(); if (jumpConn) jumpConn.end(); };
+      if (jumpConn) {
+        conn.on('close', () => jumpConn.end());
+        jumpConn.on('close', () => conn.end());
+        conn.jumpConn = jumpConn;
+      }
 
       cfg.hostVerifier = (rawKey, verify) => {
         const info = keyInfo(rawKey);
@@ -94,14 +119,32 @@ class SshManager {
         }).catch(() => verify(false));
       };
 
-      conn.on('keyboard-interactive', (_name, _instr, _lang, prompts, finish) => {
-        finish(prompts.map(() => host.password || ''));
+      let autoPasswordUsed = false;
+      const isPasswordPrompt = (p) => !p.echo && /pass(word|phrase)?|mot de passe|contrase/i.test(p.prompt) && !/code|otp|token|verification|vérification|one[- ]time/i.test(p.prompt);
+      conn.on('keyboard-interactive', (name, instructions, _lang, prompts, finish) => {
+        if (!prompts.length) return finish([]);
+        // Cas simple : uniquement le mot de passe, connu, pas encore essayé → réponse automatique.
+        if (host.password && !autoPasswordUsed && prompts.every(isPasswordPrompt)) {
+          autoPasswordUsed = true;
+          return finish(prompts.map(() => host.password));
+        }
+        // Sinon (code OTP, nouveau mot de passe, question inconnue…) : on demande à l'utilisateur.
+        const ask = this.bridge.askPrompts;
+        if (!ask) return finish(prompts.map(() => ''));
+        ask({
+          host: hostKeyId, label: host.label, name: name || '', instructions: instructions || '',
+          prompts: prompts.map(p => ({ prompt: p.prompt, echo: !!p.echo, prefill: isPasswordPrompt(p) && host.password && !autoPasswordUsed ? 'stored' : null }))
+        }).then(answers => {
+          if (!answers) return finish([]);
+          finish(prompts.map((p, i) => (answers[i] === '\u0000stored' ? host.password || '' : (answers[i] ?? ''))));
+          if (prompts.some(isPasswordPrompt)) autoPasswordUsed = true;
+        }).catch(() => finish([]));
       });
       conn.on('ready', () => { settled = true; resolve(conn); });
       conn.on('error', (err) => {
         if (!settled) {
           let msg = err.message;
-          if (err.level === 'client-authentication') msg = 'Authentification refusée (identifiant, mot de passe ou clé)';
+          if (err.level === 'client-authentication') msg = 'Authentification refusée (identifiant, mot de passe, clé ou code 2FA)';
           else if (/verification failed/i.test(msg)) msg = 'Clé d\'hôte refusée';
           fail(new Error(msg));
         }
@@ -122,15 +165,20 @@ class SshManager {
         this.sessions.set(sessionId, { conn, stream, kind: 'shell' });
         stream.on('data', d => this.bridge.emit('term:data', { sessionId, data: dec.write(d) }));
         stream.stderr.on('data', d => this.bridge.emit('term:data', { sessionId, data: decErr.write(d) }));
+        // « clean » = le shell distant s'est terminé normalement (exit, logout) : pas de reconnexion auto.
+        let exitInfo = null;
+        stream.on('exit', (code, signal) => { exitInfo = { code, signal }; });
         const done = (reason) => {
           if (!this.sessions.has(sessionId)) return;
           this.sessions.delete(sessionId);
-          this.bridge.emit('term:exit', { sessionId, reason });
+          const clean = !!exitInfo;
+          if (clean) reason = exitInfo.signal ? `Session terminée (signal ${exitInfo.signal})` : `Session terminée (code ${exitInfo.code ?? 0})`;
+          this.bridge.emit('term:exit', { sessionId, reason, clean });
           conn.end();
         };
-        stream.on('close', () => done('Session fermée'));
+        stream.on('close', () => setTimeout(() => done(exitInfo ? '' : 'Connexion perdue'), 50));
         conn.on('close', () => done('Connexion perdue'));
-        conn.on('error', e => done(e.message));
+        conn.on('error', e => done('Connexion perdue : ' + e.message));
         if (host.startupCommand) stream.write(host.startupCommand.replace(/\r?\n?$/, '\n'));
         resolve(true);
       });
@@ -219,11 +267,45 @@ class SshManager {
   tunnelStatus() {
     const out = {};
     for (const [id, t] of this.tunnels) out[id] = { active: true, since: t.since, connections: t.count };
+    for (const [id, r] of this.tunnelRetry || []) if (!out[id]) out[id] = { active: false, reconnecting: true, attempt: r.attempt, nextAt: r.nextAt };
     return out;
   }
 
-  async startTunnel(forwardId) {
+  // Reconnexion automatique d'un tunnel coupé (pas d'un tunnel arrêté par l'utilisateur).
+  scheduleTunnelRetry(forwardId, reason) {
+    this.tunnelRetry = this.tunnelRetry || new Map();
+    const prev = this.tunnelRetry.get(forwardId);
+    const attempt = prev ? prev.attempt + 1 : 1;
+    if (attempt > 20) {
+      this.tunnelRetry.delete(forwardId);
+      this.bridge.emit('tunnel:status', { forwardId, active: false, reason: `${reason} — abandon après 20 tentatives` });
+      return;
+    }
+    const delay = [2, 4, 8, 15, 30][Math.min(attempt - 1, 4)] * 1000;
+    const r = { attempt, nextAt: Date.now() + delay, timer: null };
+    r.timer = setTimeout(async () => {
+      if (!this.tunnelRetry.has(forwardId)) return;
+      try {
+        await this.startTunnel(forwardId, { retry: true });
+        this.tunnelRetry.delete(forwardId);
+        this.bridge.emit('tunnel:status', { forwardId, active: true, reason: `Rétabli (tentative ${attempt})` });
+      } catch (e) {
+        if (!this.tunnelRetry.has(forwardId)) return;
+        this.scheduleTunnelRetry(forwardId, e.message);
+      }
+    }, delay);
+    this.tunnelRetry.set(forwardId, r);
+    this.bridge.emit('tunnel:status', { forwardId, active: false, reconnecting: true, attempt, delay, reason });
+  }
+
+  cancelTunnelRetry(forwardId) {
+    const r = this.tunnelRetry && this.tunnelRetry.get(forwardId);
+    if (r) { clearTimeout(r.timer); this.tunnelRetry.delete(forwardId); }
+  }
+
+  async startTunnel(forwardId, opts = {}) {
     if (this.tunnels.has(forwardId)) return true;
+    if (!opts.retry) this.cancelTunnelRetry(forwardId);
     const rule = this.data.forwards.find(f => f.id === forwardId);
     if (!rule) throw new Error('Règle de tunnel introuvable');
     const conn = await this.connect(rule.hostId);
@@ -232,11 +314,13 @@ class SshManager {
     const bindPort = Number(rule.bindPort);
 
     const stop = (reason) => {
-      if (!this.tunnels.has(forwardId)) return;
+      if (this.tunnels.get(forwardId) !== t) return;
       this.tunnels.delete(forwardId);
       if (t.server) t.server.close();
       conn.end();
-      this.bridge.emit('tunnel:status', { forwardId, active: false, reason });
+      const rule2 = this.bridge.vault.isUnlocked() && this.data.forwards.find(f => f.id === forwardId);
+      if (rule2 && rule2.autoReconnect !== false) this.scheduleTunnelRetry(forwardId, reason);
+      else this.bridge.emit('tunnel:status', { forwardId, active: false, reason });
     };
     conn.on('close', () => stop('Connexion SSH fermée'));
     conn.on('error', e => stop(e.message));
@@ -281,8 +365,9 @@ class SshManager {
   }
 
   stopTunnel(forwardId) {
+    this.cancelTunnelRetry(forwardId);
     const t = this.tunnels.get(forwardId);
-    if (!t) return;
+    if (!t) { this.bridge.emit('tunnel:status', { forwardId, active: false, reason: 'Arrêté' }); return; }
     this.tunnels.delete(forwardId);
     if (t.server) t.server.close();
     t.conn.end();
@@ -315,7 +400,7 @@ class SshManager {
 
   closeAll() {
     for (const id of [...this.sessions.keys()]) this.close(id);
-    for (const id of [...this.tunnels.keys()]) this.stopTunnel(id);
+    for (const id of [...new Set([...this.tunnels.keys(), ...(this.tunnelRetry ? this.tunnelRetry.keys() : [])])]) this.stopTunnel(id);
   }
 }
 
