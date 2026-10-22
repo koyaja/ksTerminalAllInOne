@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.5.0**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.5.1** · Windows et **Linux**
 
 ---
 
@@ -79,6 +79,16 @@
    - crée les raccourcis **Bureau** et **menu Démarrer**, puis lance l'application.
 
 Une mise à jour s'installe de la même façon : le coffre (`%APPDATA%\KSTermus`) n'est jamais touché.
+
+### Option Linux (x86_64)
+
+| Paquet | Installation |
+|---|---|
+| `kstermus_<v>_amd64.deb` (Debian, Ubuntu, Mint…) | `sudo apt install ./kstermus_1.5.1_amd64.deb` puis menu ▸ **KSTermus** ou `kstermus` |
+| `KSTermus-<v>-x86_64.AppImage` (toutes distributions) | `chmod +x KSTermus-1.5.1-x86_64.AppImage && ./KSTermus-1.5.1-x86_64.AppImage` (sans FUSE : `--appimage-extract-and-run`) |
+| `kstermus-<v>.tar.gz` (portable) | `tar xzf kstermus-1.5.1.tar.gz && ./kstermus-1.5.1/kstermus` |
+
+Sous Linux : terminaux locaux bash / zsh / fish, coffre dans `~/.config/KSTermus/`. Windows Hello n'existe pas ; les mises à jour sont **notifiées** (lien vers la release) mais pas installées automatiquement.
 
 ### Option 2 — Depuis les sources
 
@@ -332,6 +342,7 @@ npm install          # dépendances (dont le PTY natif précompilé)
 npm start            # lancer en mode développement
 npm test             # tests d'intégration (voir « Tests »)
 npm run dist:dir     # application Windows dépliée dans dist/win-unpacked
+npm run dist:linux   # AppImage + .deb + .tar.gz dans dist/
 npm run dist         # installateur NSIS + version portable (nécessite Wine sous Linux)
 ```
 
@@ -388,7 +399,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-45 tests couvrent :
+46 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -460,6 +471,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.5.1** | **Version Linux** (AppImage, .deb, .tar.gz) ; sous Linux, mise à jour notifiée avec lien vers la release au lieu de télécharger le zip Windows |
 | **1.5.0** | Mises à jour automatiques depuis GitHub Releases (manifeste signé Ed25519, SHA-256, téléchargement en arrière-plan, redémarrer ou installer à la fermeture), script de release signée |
 | **1.4.0** | Verrouillage d'écran (sessions conservées) : automatique après inactivité, avec Windows et en veille, `Ctrl+Shift+L` ; déverrouillage Windows Hello (écran, et au démarrage en option) ; recherche dans le terminal (`Ctrl+Shift+F`) ; version affichée sur l'écran de verrouillage ; badge d'authentification des cartes host mieux aligné |
 | **1.3.0** | 2FA / OTP (keyboard-interactive), jump hosts multi-rebonds (+ import ProxyJump), reconnexion automatique des terminaux SSH et des tunnels, distinction fin de session / coupure |

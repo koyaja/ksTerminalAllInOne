@@ -348,11 +348,12 @@
         st.date ? h('span', { text: new Date(st.date).toLocaleDateString('fr-FR') }) : null),
       st.notes ? h('pre', { class: 'update-notes', text: st.notes }) : h('p', { class: 'muted', text: 'Pas de notes de version.' }),
       ['downloading', 'extracting'].includes(st.status) ? h('div', { class: 'update-bar' }, h('i', { style: { width: Math.round((st.progress || 0) * 100) + '%' } })) : null,
-      h('p', { class: 'muted small', text: 'Archive signée (Ed25519) et vérifiée (SHA-256) avant installation.' }),
+      h('p', { class: 'muted small', text: st.downloadable === false ? 'Sous Linux : télécharge le paquet (AppImage / .deb / .tar.gz) depuis la page de la release.' : 'Archive signée (Ed25519) et vérifiée (SHA-256) avant installation.' }),
       st.status === 'ready' && sessions ? h('p', { class: 'small', style: { color: 'var(--warn)' }, text: `⚠ ${sessions} onglet(s) ouvert(s) seront fermés au redémarrage.` }) : null
     ];
     const actions = [{ label: 'Plus tard', value: null }, { label: 'Page de la release', value: 'page' }];
-    if (st.status === 'available') actions.push({ label: st.canInstall ? 'Télécharger et préparer' : 'Télécharger', class: 'primary', value: 'download' });
+    if (st.status === 'available' && st.downloadable) actions.push({ label: st.canInstall ? 'Télécharger et préparer' : 'Télécharger', class: 'primary', value: 'download' });
+    if (st.status === 'available' && !st.downloadable) { actions.pop(); actions.push({ label: 'Ouvrir la page de la release', class: 'primary', value: 'page' }); }
     if (st.status === 'ready') actions.push({ label: 'Redémarrer maintenant', class: 'primary', value: 'install' });
     const r = await modal({ title: `KSTermus ${st.version}`, body, actions, wide: true });
     if (r === 'page') api.invoke('update:openPage');

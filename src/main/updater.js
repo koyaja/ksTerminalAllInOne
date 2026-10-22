@@ -143,7 +143,7 @@ class Updater {
       if (!zAsset) throw new Error('Archive ' + m.file + ' absente de la release');
       this.manifest = { ...m, url: zAsset.browser_download_url, page: rel.html_url || RELEASES_PAGE };
       if (this.stageReady && this.state.version === m.version) return this.set({ status: 'ready' });
-      return this.set({ status: 'available', version: m.version, notes: m.notes || '', size: m.size, date: m.date || rel.published_at || null, page: this.manifest.page });
+      return this.set({ status: 'available', downloadable: this.platform === 'win32', version: m.version, notes: m.notes || '', size: m.size, date: m.date || rel.published_at || null, page: this.manifest.page });
     } catch (e) {
       return this.set({ status: 'error', error: e.message });
     }
@@ -153,6 +153,7 @@ class Updater {
   async download() {
     const m = this.manifest;
     if (!m) throw new Error('Aucune mise à jour à télécharger');
+    if (this.platform !== 'win32') throw new Error('Archive Windows uniquement : télécharge la version Linux depuis la page de la release');
     if (this.state.status === 'downloading' || this.state.status === 'extracting') return this.state;
     fs.mkdirSync(this.dir, { recursive: true });
     const file = path.join(this.dir, m.file);

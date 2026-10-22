@@ -1,7 +1,7 @@
 {
   "name": "kstermus",
   "productName": "KSTermus",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Client SSH / SFTP avec keychain chiffré, snippets et port forwarding",
   "author": "CYBERISK",
   "license": "UNLICENSED",
@@ -10,7 +10,8 @@
     "start": "electron .",
     "test": "node test/run-tests.js",
     "dist": "electron-builder --win nsis portable",
-    "dist:dir": "electron-builder --win dir"
+    "dist:dir": "electron-builder --win dir",
+    "dist:linux": "electron-builder --linux"
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.15",
@@ -65,7 +66,42 @@
         "from": "assets/icon.ico",
         "to": "icon.ico"
       }
-    ]
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ],
+      "icon": "assets/icon-1024.png",
+      "category": "Development",
+      "executableName": "kstermus",
+      "synopsis": "Client SSH / SFTP avec keychain chiffré",
+      "maintainer": "CYBERISK <noreply@kstermus.invalid>",
+      "desktop": {
+        "entry": {
+          "Name": "KSTermus",
+          "StartupWMClass": "KSTermus",
+          "Keywords": "ssh;sftp;terminal;"
+        }
+      }
+    },
+    "appImage": {
+      "artifactName": "KSTermus-${version}-x86_64.${ext}"
+    },
+    "deb": {
+      "artifactName": "kstermus_${version}_amd64.${ext}",
+      "depends": [
+        "libgtk-3-0",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ]
+    }
   },
   "optionalDependencies": {
     "@lydell/node-pty-win32-x64": "1.2.0-beta.15"

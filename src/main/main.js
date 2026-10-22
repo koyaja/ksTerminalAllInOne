@@ -45,7 +45,7 @@ function autoUpdateEnabled() { try { return JSON.parse(fs.readFileSync(updPrefsF
 async function autoUpdateCycle() {
   if (!autoUpdateEnabled()) return;
   const st = await updater.check();
-  if (st.status === 'available' && autoUpdateEnabled()) await updater.download();
+  if (st.status === 'available' && st.downloadable && autoUpdateEnabled()) await updater.download();
 }
 setTimeout(autoUpdateCycle, 15000).unref();
 setInterval(autoUpdateCycle, 6 * 3600 * 1000).unref();

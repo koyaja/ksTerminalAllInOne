@@ -503,7 +503,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   });
   await new Promise(r => upSrv.listen(0, '127.0.0.1', r));
   const FEED = `http://127.0.0.1:${upSrv.address().port}/repos/x/y/releases/latest`;
-  const mkUpd = (o = {}) => new Updater({ currentVersion: '9.0.0', feed: FEED, publicKey: PUB, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'kst-upd-')), platform: 'linux', ...o });
+  const mkUpd = (o = {}) => new Updater({ currentVersion: '9.0.0', feed: FEED, publicKey: PUB, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'kst-upd-')), platform: 'win32', ...o });
 
   await test('versions : comparaison semver', async () => {
     assert.strictEqual(cmpVersion('1.10.0', '1.9.9'), 1);
@@ -520,6 +520,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.strictEqual(d.status, 'downloaded', d.error);
     assert.ok(fs.readFileSync(d.file).equals(zipBytes));
     assert.ok(states.includes('downloading'));
+  });
+  await test('mise à jour sous Linux : notification seulement, pas de téléchargement du zip Windows', async () => {
+    const u = mkUpd({ platform: 'linux' });
+    const st = await u.check();
+    assert.strictEqual(st.status, 'available'); assert.strictEqual(st.downloadable, false);
+    await assert.rejects(u.download(), /Windows uniquement/);
   });
   await test('mise à jour : même version ou version plus ancienne → rien', async () => {
     assert.strictEqual((await mkUpd({ currentVersion: '9.1.0' }).check()).status, 'none');
