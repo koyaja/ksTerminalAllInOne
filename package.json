@@ -11,7 +11,7 @@
     "test": "node test/run-tests.js",
     "dist": "electron-builder --win nsis portable",
     "dist:dir": "electron-builder --win dir",
-    "dist:linux": "electron-builder --linux"
+    "dist:linux": "electron-builder --linux && sh build/repack-deb.sh"
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.15",
