@@ -475,6 +475,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.ok(PS_VERIFY.includes('ContentType=WindowsRuntime'));
   });
 
+  console.log('Sauvegarde / restauration');
+  await test('export complet (coffre + historique) puis restauration sur un autre PC', async () => {
+    const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-win-'));
+    const src = new Vault(srcDir);
+    src.create('Pass-Windows-1');
+    src.data.hosts.push({ id: 'h1', label: 'ProdKS', password: 's3cret' }); src.data.snippets.push({ id: 's', name: 'df', command: 'df -h' }); src.save();
+    const hk = 'a'.repeat(64);
+    src.writeHistory(hk, [{ id: 'v1', content: 'server { listen 80; }' }]);
+    const bak = path.join(srcDir, 'kstermus-backup.kst');
+    src.exportTo(bak);
+    const raw = fs.readFileSync(bak, 'utf8');
+    assert.ok(!raw.includes('s3cret') && !raw.includes('listen 80'), 'rien en clair dans la sauvegarde');
+    // « Linux » : coffre déjà créé avec un autre mot de passe
+    const dstDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-linux-'));
+    const dst = new Vault(dstDir); dst.create('Autre-Mdp-Linux');
+    assert.throws(() => dst.restoreFrom(bak, 'Autre-Mdp-Linux'), /mot de passe maître du PC d'origine/);
+    const sum = dst.restoreFrom(bak, 'Pass-Windows-1');
+    assert.deepStrictEqual([sum.hosts, sum.snippets, sum.history], [1, 1, 1]);
+    assert.strictEqual(dst.data.hosts[0].password, 's3cret');
+    assert.strictEqual(dst.readHistory(hk)[0].content, 'server { listen 80; }');
+    assert.ok(fs.readdirSync(dstDir).some(f => f.startsWith('vault.kst.avant-restauration-')), 'ancien coffre conservé');
+    const again = new Vault(dstDir); again.unlock('Pass-Windows-1'); assert.strictEqual(again.data.hosts[0].label, 'ProdKS');
+  });
+  await test('restauration : ancien format (vault.kst brut) et fichier invalide', async () => {
+    const d1 = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-old-'));
+    const v1 = new Vault(d1); v1.create('Ancien-Format-1'); v1.data.hosts.push({ id: 'x', label: 'Old' }); v1.save();
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-new-'));
+    const v2 = new Vault(d2);
+    assert.strictEqual(v2.restoreFrom(path.join(d1, 'vault.kst'), 'Ancien-Format-1').hosts, 1);
+    const junk = path.join(d2, 'junk.kst'); fs.writeFileSync(junk, '{"hello":1}');
+    assert.throws(() => Vault.readBackup(junk), /pas une sauvegarde/);
+    fs.writeFileSync(junk, 'PK\u0003\u0004binaire');
+    assert.throws(() => Vault.readBackup(junk), /illisible/);
+  });
+
   console.log('Mises à jour');
   const { Updater, signManifest, verifyManifest, cmpVersion, SWAP_PS1, EXTRACT_PS1 } = require('../src/main/updater');
   const crypto = require('crypto');

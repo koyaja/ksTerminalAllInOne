@@ -162,10 +162,29 @@ handle('hello:configure', async ({ screen: onScreen, startup }) => {
   return publicState();
 });
 handle('vault:backup', async () => {
-  const r = await dialog.showSaveDialog(win, { defaultPath: `kstermus-backup-${new Date().toISOString().slice(0, 10)}.kst` });
+  const r = await dialog.showSaveDialog(win, { title: 'Exporter le coffre (chiffré)', defaultPath: path.join(app.getPath('documents'), `kstermus-backup-${new Date().toISOString().slice(0, 10)}.kst`), filters: [{ name: 'Sauvegarde KSTermus', extensions: ['kst'] }] });
   if (r.canceled || !r.filePath) return false;
   vault.exportTo(r.filePath);
   return r.filePath;
+});
+// Restauration : choisir le fichier (aucune donnée lue côté interface), puis restaurer avec le mot de passe.
+let pendingRestore = null;
+handle('vault:restorePick', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Restaurer une sauvegarde KSTermus', properties: ['openFile'], filters: [{ name: 'Sauvegarde KSTermus', extensions: ['kst', 'json'] }, { name: 'Tous les fichiers', extensions: ['*'] }] });
+  if (r.canceled || !r.filePaths.length) return null;
+  const b = Vault.readBackup(r.filePaths[0]); // valide le format tout de suite
+  pendingRestore = r.filePaths[0];
+  return { file: path.basename(r.filePaths[0]), createdAt: b.createdAt, history: Object.keys(b.history).length, replaces: vault.exists() };
+});
+handle('vault:restore', (pw) => {
+  if (!pendingRestore) throw new Error('Choisis d\'abord le fichier de sauvegarde');
+  lock.checkThrottle();
+  manager.closeAll(); localMgr.killAll();
+  let summary;
+  try { summary = vault.restoreFrom(pendingRestore, pw); } catch (e) { if (/Mot de passe/.test(e.message)) lock.fail(); throw e; }
+  pendingRestore = null;
+  hello.clearStartupKey(); // l'ancienne clé Hello ne correspond plus au coffre
+  return { summary, state: afterUnlock() };
 });
 handle('state:get', () => publicState());
 handle('settings:save', (s) => {

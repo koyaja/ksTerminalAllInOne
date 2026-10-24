@@ -187,6 +187,8 @@
     $('#lock-btn').textContent = btn;
     $('#lock-hello').hidden = !hello;
     $('#lock-full').hidden = !full;
+    $('#lock-restore').hidden = !!full;
+    $('#lock-restore').textContent = 'Restaurer une sauvegarde (.kst) depuis un autre PC…';
     $('#lock-note').hidden = !!full;
     $('#lock-pw').value = ''; $('#lock-pw2').value = '';
     $('#lock-error').hidden = true;
@@ -196,10 +198,17 @@
       const pw = $('#lock-pw').value;
       const err = $('#lock-error');
       err.hidden = true;
-      if (creating && pw !== $('#lock-pw2').value) { err.textContent = 'Les deux mots de passe diffèrent'; err.hidden = false; return; }
+      if (creating && !restoreInfo && pw !== $('#lock-pw2').value) { err.textContent = 'Les deux mots de passe diffèrent'; err.hidden = false; return; }
       $('#lock-btn').disabled = true;
       $('#lock-btn').textContent = lockMode === 'screen' ? 'Vérification…' : 'Déchiffrement…';
       try {
+        if (restoreInfo) {
+          const r = await api.invoke('vault:restore', pw);
+          restoreInfo = null;
+          unlocked(r.state);
+          toast(restoreSummary(r.summary));
+          return;
+        }
         const ch = lockMode === 'screen' ? 'vault:unlockScreen' : creating ? 'vault:create' : 'vault:unlock';
         const s = await api.invoke(ch, pw);
         unlocked(s);
@@ -208,7 +217,7 @@
         $('#lock-pw').select();
       } finally {
         $('#lock-btn').disabled = false;
-        $('#lock-btn').textContent = btn;
+        $('#lock-btn').textContent = restoreInfo ? 'Restaurer' : btn;
       }
     };
   }
@@ -228,6 +237,46 @@
   function showApp() {
     $('#lock').hidden = true; $('#app').hidden = false; activateTab('home');
     api.invoke('local:shells').then(list => { ui.shells = list || []; if (ui.section === 'local') renderSection(); }).catch(() => {});
+  }
+
+  // ----- Restauration d'une sauvegarde (autre PC, autre système) -----
+  let restoreInfo = null;
+  function restoreSummary(x) {
+    return `Sauvegarde restaurée : ${x.hosts} host(s), ${x.keys} clé(s), ${x.snippets} snippet(s), ${x.forwards} tunnel(s)` + (x.history ? `, ${x.history} historique(s)` : '');
+  }
+  $('#lock-restore').onclick = async () => {
+    if (restoreInfo) { restoreInfo = null; initLock(); return; } // « Annuler »
+    const err = $('#lock-error'); err.hidden = true;
+    let info;
+    try { info = await api.invoke('vault:restorePick'); } catch (ex) { err.textContent = ex.message; err.hidden = false; return; }
+    if (!info) return;
+    restoreInfo = info;
+    $('#lock-pw2-wrap').hidden = true; $('#lock-pw2').required = false;
+    $('#lock-hello').hidden = true;
+    $('#lock-hint').textContent = `Sauvegarde « ${info.file} »` + (info.createdAt ? ` du ${new Date(info.createdAt).toLocaleString('fr-FR')}` : '') +
+      `. Entre le mot de passe maître du PC d'origine.` + (info.replaces ? ' Le coffre actuel de ce PC sera remplacé (une copie est gardée).' : '');
+    $('#lock-btn').textContent = 'Restaurer';
+    $('#lock-restore').textContent = 'Annuler la restauration';
+    $('#lock-pw').value = ''; $('#lock-pw').focus();
+  };
+
+  async function restoreFromSettings() {
+    if (!(await confirmBox('Restaurer une sauvegarde', 'Le coffre actuel sera remplacé par la sauvegarde (une copie de l\'actuel est gardée à côté). Les sessions et tunnels ouverts seront fermés.', 'Choisir le fichier'))) return;
+    const info = await guard(() => api.invoke('vault:restorePick'));
+    if (!info) return;
+    const pw = h('input', { type: 'password' });
+    const r = await modal({
+      title: 'Restaurer « ' + info.file + ' »',
+      body: [h('p', { class: 'muted small', text: (info.createdAt ? `Sauvegarde du ${new Date(info.createdAt).toLocaleString('fr-FR')}. ` : '') + 'Mot de passe maître du PC d\'origine :' }), secretInput(pw, { copy: false })],
+      actions: [{ label: 'Annuler', value: null }, { label: 'Restaurer', class: 'primary', submit: true, onClick: async () => {
+        try { return await api.invoke('vault:restore', pw.value); } catch (ex) { toast(ex.message, true); return false; }
+      } }]
+    });
+    if (!r) return;
+    for (const id of [...tabs.keys()]) disposeTab(id);
+    setState(r.state);
+    activateTab('home');
+    toast(restoreSummary(r.summary));
   }
 
   async function unlockWithHello() {
@@ -795,8 +844,10 @@
             sel.value = defaultShellId() || ''; sel.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { defaultShell: sel.value })); if (s) S = s; }); return sel; })()),
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Mot de passe maître' }), h('div', { class: 'muted small', text: 'Re-chiffre tout le coffre.' })),
           h('button', { class: 'btn sm', onclick: changeMaster }, 'Changer')),
-        h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Sauvegarde du coffre' }), h('div', { class: 'muted small', text: 'Fichier .kst chiffré, à copier dans %APPDATA%\\KSTermus\\vault.kst pour restaurer.' })),
-          h('button', { class: 'btn sm', onclick: async () => { const p = await guard(() => api.invoke('vault:backup')); if (p) toast('Sauvegardé : ' + p); } }, 'Exporter')),
+        h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Sauvegarde du coffre' }), h('div', { class: 'muted small', text: 'Fichier .kst chiffré (coffre + historique). Restaurer fonctionne entre Windows et Linux, avec le mot de passe maître d\'origine.' })),
+          h('div', { style: { display: 'flex', gap: '8px' } },
+            h('button', { class: 'btn sm', onclick: async () => { const p = await guard(() => api.invoke('vault:backup')); if (p) toast('Sauvegardé : ' + p); } }, 'Exporter'),
+            h('button', { class: 'btn sm', onclick: restoreFromSettings }, 'Restaurer…'))),
         h('div', { class: 'row', style: { alignItems: 'flex-start' } }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Raccourcis clavier' }),
           h('div', { class: 'kbd-list' }, SHORTCUTS.map(([k, d]) => h('div', { class: 'kbd-row' }, h('kbd', { text: k }), h('span', { text: d }))))))));
   }

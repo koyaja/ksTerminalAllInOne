@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.5.1** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.6.0** · Windows et **Linux**
 
 ---
 
@@ -331,7 +331,14 @@ KSTermus interroge les [releases GitHub](https://github.com/koyaja/ksTerminalAll
 | Clé Windows Hello (DPAPI, optionnelle) | `%APPDATA%\KSTermus\hello.kst` |
 | Position / taille de la fenêtre | `%APPDATA%\KSTermus\window-state.json` |
 
-**Migrer vers un autre PC** : copie le dossier `%APPDATA%\KSTermus` (ou **Paramètres ▸ Exporter**), installe KSTermus, remets le dossier en place, puis déverrouille avec le même mot de passe maître.
+**Migrer vers un autre PC (Windows ↔ Linux)** :
+1. PC d'origine : **Paramètres ▸ Sauvegarde du coffre ▸ Exporter** → `kstermus-backup-AAAA-MM-JJ.kst` (coffre + historique des éditions, tout reste chiffré).
+2. Nouveau PC : installe KSTermus, puis sur l'écran de verrouillage clique **« Restaurer une sauvegarde (.kst) depuis un autre PC… »** (ou **Paramètres ▸ Restaurer…** si un coffre existe déjà).
+3. Entre le **mot de passe maître du PC d'origine**. Le coffre local éventuel est conservé à côté (`vault.kst.avant-restauration-<date>`).
+
+Les anciens exports (simple copie de `vault.kst`) sont aussi acceptés. Emplacement du coffre : `%APPDATA%\KSTermus\` sous Windows, `~/.config/KSTermus/` sous Linux.
+
+**Ancienne méthode manuelle** : copie le dossier `%APPDATA%\KSTermus` (ou **Paramètres ▸ Exporter**), installe KSTermus, remets le dossier en place, puis déverrouille avec le même mot de passe maître.
 
 ---
 
@@ -399,7 +406,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-46 tests couvrent :
+48 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -471,6 +478,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.6.0** | **Restauration d'une sauvegarde** depuis l'écran de verrouillage ou les Paramètres (Windows ↔ Linux), export complet coffre + historique, ancien coffre conservé, anciens exports acceptés |
 | **1.5.1** | **Version Linux** (AppImage, .deb, .tar.gz) ; sous Linux, mise à jour notifiée avec lien vers la release au lieu de télécharger le zip Windows |
 | **1.5.0** | Mises à jour automatiques depuis GitHub Releases (manifeste signé Ed25519, SHA-256, téléchargement en arrière-plan, redémarrer ou installer à la fermeture), script de release signée |
 | **1.4.0** | Verrouillage d'écran (sessions conservées) : automatique après inactivité, avec Windows et en veille, `Ctrl+Shift+L` ; déverrouillage Windows Hello (écran, et au démarrage en option) ; recherche dans le terminal (`Ctrl+Shift+F`) ; version affichée sur l'écran de verrouillage ; badge d'authentification des cartes host mieux aligné |

@@ -153,8 +153,54 @@ class Vault {
     fs.renameSync(tmp, this.file);
   }
 
-  // Export / import d'une sauvegarde chiffrée (même format que le coffre).
-  exportTo(file) { fs.copyFileSync(this.file, file); }
+  // ----- Sauvegarde / restauration -----
+  // Format « kstermus-backup » : le coffre ET l'historique des éditions, tous
+  // deux restés chiffrés (rien n'est déchiffré pour l'export). Portable entre
+  // Windows, Linux et macOS.
+  exportTo(file) {
+    const history = {};
+    for (const f of this.historyFiles()) history[path.basename(f, '.kst')] = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const bundle = { type: 'kstermus-backup', v: 1, createdAt: new Date().toISOString(), vault: JSON.parse(fs.readFileSync(this.file, 'utf8')), history };
+    fs.writeFileSync(file, JSON.stringify(bundle), { mode: 0o600 });
+  }
+
+  // Lit une sauvegarde : nouveau format (bundle) ou ancien vault.kst brut.
+  static readBackup(file) {
+    let raw;
+    try { raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
+    catch { throw new Error('Fichier illisible : ce n\'est pas une sauvegarde KSTermus'); }
+    if (raw && raw.type === 'kstermus-backup' && raw.vault) return { vault: raw.vault, history: raw.history || {}, createdAt: raw.createdAt || null };
+    if (raw && raw.salt && raw.iv && raw.tag && raw.data) return { vault: raw, history: {}, createdAt: null };
+    throw new Error('Ce fichier n\'est pas une sauvegarde KSTermus (.kst)');
+  }
+
+  // Vérifie le mot de passe sur la sauvegarde, puis remplace le coffre local
+  // (l'ancien est conservé en vault.kst.avant-restauration-<date>) et l'ouvre.
+  restoreFrom(file, password) {
+    const b = Vault.readBackup(file);
+    const salt = Buffer.from(b.vault.salt, 'base64');
+    const key = deriveKey(String(password || ''), salt, b.vault.kdf);
+    let data;
+    try { data = decrypt(key, b.vault); } catch { throw new Error('Mot de passe incorrect pour cette sauvegarde (c\'est le mot de passe maître du PC d\'origine)'); }
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    if (fs.existsSync(this.file)) fs.copyFileSync(this.file, `${this.file}.avant-restauration-${stamp}`);
+    const tmp = this.file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(b.vault), { mode: 0o600 });
+    fs.renameSync(tmp, this.file);
+    let restored = 0;
+    for (const [k, blob] of Object.entries(b.history)) {
+      if (!/^[a-f0-9]{64}$/.test(k)) continue;
+      fs.mkdirSync(this.historyDir, { recursive: true });
+      fs.writeFileSync(this.historyFile(k), JSON.stringify(blob), { mode: 0o600 });
+      restored++;
+    }
+    this.lock();
+    this.salt = salt;
+    this.key = key;
+    this.data = Object.assign(emptyData(), data);
+    return { hosts: this.data.hosts.length, keys: this.data.keys.length, snippets: this.data.snippets.length, forwards: this.data.forwards.length, history: restored, createdAt: b.createdAt };
+  }
 }
 
 module.exports = { Vault, emptyData };
