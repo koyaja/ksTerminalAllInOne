@@ -494,6 +494,12 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 
 ## Publier une release
 
+**Automatique (GitHub Actions)** : à chaque push sur `main` qui change la version de `package.json`, le workflow `.github/workflows/release.yml` construit Windows + Linux et publie la release `vX.Y.Z` (zip Windows, `.deb`, `.AppImage`, `.tar.gz`, `SHA256SUMS.txt`, notes tirées de l'historique ci-dessous). Relance manuelle : **Actions ▸ Release ▸ Run workflow**.
+
+Pour que les postes installés soient **notifiés** (mise à jour automatique), ajouter une fois le secret du dépôt **`KSTERMUS_SIGNING_KEY`** (*Settings ▸ Secrets and variables ▸ Actions ▸ New repository secret*) avec le contenu complet de `kstermus-update-signing.pem`. Sans ce secret, la release est publiée sans `update.json`.
+
+**Manuel** (sans GitHub Actions) :
+
 La clé privée de signature (`kstermus-update-signing.pem`) **ne doit jamais être commitée** (`*.pem` est dans `.gitignore`). Sans elle, impossible de publier une mise à jour acceptée par les postes installés ; si elle fuit, n'importe qui peut en signer une. Garde-la hors du dépôt, avec une copie de sauvegarde.
 
 ```bash

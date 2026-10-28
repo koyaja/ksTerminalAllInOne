@@ -1,0 +1,104 @@
+# Publie une release GitHub dès que la version de package.json change sur main
+# (ou à la main : Actions ▸ Release ▸ Run workflow).
+#   · Windows : KSTermus-win-x64-<v>.zip (+ update.json signé si le secret existe)
+#   · Linux   : .deb, .AppImage, .tar.gz
+# Secret optionnel KSTERMUS_SIGNING_KEY = contenu de kstermus-update-signing.pem :
+# sans lui, la release est publiée mais les postes installés ne sont pas notifiés.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json, .github/workflows/release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: v
+        run: |
+          V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if gh release view "v$V" >/dev/null 2>&1; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/setup-node@v4
+        if: steps.v.outputs.exists == 'false'
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Dépendances
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          npm ci
+          # PTY Windows précompilé (npm l'ignore sous Linux)
+          npm pack @lydell/node-pty-win32-x64@1.2.0-beta.15
+          mkdir -p node_modules/@lydell/node-pty-win32-x64
+          tar xzf lydell-node-pty-win32-x64-*.tgz -C node_modules/@lydell/node-pty-win32-x64 --strip-components=1
+
+      - name: Tests (hors serveur SSH)
+        if: steps.v.outputs.exists == 'false'
+        run: node -e "for (const m of ['vault','vpn','lock','updater','hello']) require('./src/main/' + m); require('./src/renderer/themes.js'); console.log('modules OK')"
+
+      - name: Build Linux
+        if: steps.v.outputs.exists == 'false'
+        run: npm run dist:linux
+
+      - name: Build Windows
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          npm run dist:dir
+          rm -rf dist/pkg && mkdir -p dist/pkg && cp -r dist/win-unpacked dist/pkg/KSTermus
+          (cd dist/pkg && zip -qr -9 ../KSTermus-win-x64.zip KSTermus)
+
+      - name: Notes de version
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          V=${{ steps.v.outputs.version }}
+          LINE=$(grep -F "| **$V** |" README.md | head -1 | sed -E 's/^\| \*\*[^*]+\*\* \| //; s/ \|$//')
+          {
+            echo "${LINE:-KSTermus $V}"
+            echo
+            echo "**Windows** : extraire \`KSTermus-win-x64-$V.zip\` dans \`%LOCALAPPDATA%\\Programs\\\` (ou mise à jour automatique depuis l'application)."
+            echo "**Linux** : \`sudo apt install ./kstermus_${V}_amd64.deb\`, ou l'AppImage, ou le .tar.gz."
+          } > notes.md
+          cat notes.md
+
+      - name: Signer la mise à jour Windows
+        if: steps.v.outputs.exists == 'false'
+        env:
+          KEY: ${{ secrets.KSTERMUS_SIGNING_KEY }}
+        run: |
+          V=${{ steps.v.outputs.version }}
+          if [ -n "$KEY" ]; then
+            umask 077; printf '%s\n' "$KEY" > "$RUNNER_TEMP/k.pem"
+            node scripts/make-release.js --zip dist/KSTermus-win-x64.zip --notes notes.md --key "$RUNNER_TEMP/k.pem"
+            rm -f "$RUNNER_TEMP/k.pem"
+          else
+            echo "::warning::Secret KSTERMUS_SIGNING_KEY absent : pas d'update.json, les postes ne seront pas notifiés."
+            mkdir -p dist/release && cp dist/KSTermus-win-x64.zip "dist/release/KSTermus-win-x64-$V.zip"
+          fi
+          cp dist/kstermus_${V}_amd64.deb dist/KSTermus-${V}-x86_64.AppImage dist/kstermus-${V}.tar.gz dist/release/
+          (cd dist/release && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Publier
+        if: steps.v.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=${{ steps.v.outputs.version }}
+          rm -f dist/release/notes.md
+          gh release create "v$V" dist/release/* --title "KSTermus $V" --notes-file notes.md --target "$GITHUB_SHA"
