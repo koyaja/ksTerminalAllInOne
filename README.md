@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.8.1** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.9.0** · Windows et **Linux**
 
 ---
 
@@ -23,6 +23,7 @@
    - [Keychain et mots de passe](#keychain-et-mots-de-passe)
    - [Port forwarding](#port-forwarding)
    - [VPN WireGuard](#vpn-wireguard)
+   - [Production, journal d'audit et enregistrements](#production-journal-daudit-et-enregistrements)
    - [Known hosts](#known-hosts)
    - [Verrouillage et Windows Hello](#verrouillage-et-windows-hello)
    - [Recherche dans le terminal](#recherche-dans-le-terminal)
@@ -63,6 +64,9 @@
 | **Keychain** | Import OpenSSH / PEM / PuTTY `.ppk`, génération ed25519 / RSA 4096, export, copie de la clé publique |
 | **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
+| **Production** | Hosts marqués **PROD** (badge et cadre rouges) ; commande dangereuse (`rm -rf /`, `DROP`, `mkfs`, `reboot`, `git push --force`…) bloquée jusqu'à ce qu'on retape le nom du host |
+| **Audit** | Journal **chiffré** : connexions, commandes, fichiers modifiés, transferts, VPN, secrets consultés, déverrouillages ; filtres, export CSV, rétention |
+| **Enregistrements** | Sessions SSH enregistrées (asciicast chiffré) et **relues dans l'app** (pause, vitesse x1-x8, barre de temps), export `.cast` |
 | **Sécurité** | Coffre AES-256-GCM + scrypt, vérification des empreintes serveur (TOFU), alerte bloquante si une empreinte change |
 | **Thèmes** | 7 thèmes + **Automatique** (suit le mode clair/sombre du système) : Sombre doux, Clair sépia, Nord, Solarized, KSTermus, Clair, Contraste élevé — interface, terminaux et éditeur |
 | **Fenêtre** | Barre de titre intégrée, taille/position mémorisées, instance unique, confirmation à la fermeture, plein écran |
@@ -255,6 +259,14 @@ Fonctionnement : chaque VPN démarré lance `kst-wg` (wireguard-go officiel + pi
 - Avec un jump host, c'est le VPN du **bastion** (premier saut) qui est utilisé.
 - *« injoignable dans le tunnel »* : serveur éteint, adresse hors des `AllowedIPs`, ou pas de handshake (Endpoint ou clés incorrects). Le statut *« en attente du serveur »* signifie qu'aucun handshake n'a encore abouti.
 
+### Production, journal d'audit et enregistrements
+
+**Hosts de production** — formulaire du host ▸ **Environnement** : *Développement*, *Recette*, **PRODUCTION**. Un host PROD a un badge et un cadre rouges. Avant d'exécuter une commande dangereuse sur ce host, KSTermus affiche la commande et la raison, et n'exécute qu'après avoir **retapé le nom du host** (Échap = la commande reste sur la ligne, non exécutée). Détectées : suppressions récursives de dossiers système (`rm -rf /`, `~`, `*`, `/etc`…), `mkfs`, `dd of=/dev/…`, partitions, `reboot` / `shutdown`, arrêt de `sshd` / bases / docker, pare-feu vidé, fork bomb, `crontab -r`, `docker … prune -a`, `compose down -v`, `kubectl delete ns`, `terraform destroy`, `git push --force`, `git reset --hard`, SQL `DROP` / `TRUNCATE` / `DELETE` ou `UPDATE` sans `WHERE`, Redis `FLUSHALL`… Collages multi-lignes et diffusion à plusieurs panneaux compris. *Paramètres ▸ Alerte commandes dangereuses* : hosts PROD (défaut), tous les terminaux, ou désactivée.
+
+**Journal** (*Journal ▸ Événements*) : connexions et échecs, déconnexions (durée), commandes SSH, commandes dangereuses exécutées / annulées, fichiers enregistrés (sudo), transferts SFTP, VPN, mots de passe affichés / copiés, déverrouillages (et tentatives refusées), exports. Filtres par période, type, host, texte ; export CSV. Chiffré (AES-256-GCM) avec une clé gardée dans le coffre ; rétention réglable (30 jours à illimitée).
+
+**Enregistrements** (*Journal ▸ Enregistrements*) : cocher *Enregistrer les sessions* sur un host (ou *Paramètres ▸ Enregistrement des sessions SSH* : toutes). Tout l'affichage du terminal est enregistré (asciicast v2, chiffré) ; **▶ Relire** ouvre un lecteur (pause, vitesse x1-x8, déplacement dans le temps, temps morts plafonnés à 2 s) ; **⤓** exporte un `.cast` lisible par asciinema. Un mot de passe tapé à une invite masquée n'apparaît pas à l'écran, il n'est donc pas enregistré. Limite : 50 Mo par session.
+
 ### Known hosts
 
 La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la connexion est **bloquée**, avec l'ancienne et la nouvelle empreinte affichées : il peut s'agir d'une réinstallation ou d'une attaque de type *man-in-the-middle*. **Oublier** permet de réaccepter après vérification.
@@ -407,6 +419,7 @@ src/
 │   ├── remote-editor.js       Lecture / écriture de fichiers distants (SFTP ou sudo), conflits
 │   ├── local-pty.js           Terminaux locaux (ConPTY), détection des shells, sessions détachables
 │   ├── lock.js                Verrouillage d'écran : inactivité, filtrage IPC, anti force brute
+│   ├── audit.js               Journal d'audit et enregistrements chiffrés (clé de données du coffre)
 │   ├── vpn.js                 VPN WireGuard : lecture .conf, processus kst-wg, SOCKS5 authentifié
 │   ├── updater.js             Mises à jour GitHub Releases : manifeste signé, téléchargement, remplacement
 │   ├── hello.js               Windows Hello (WinRT via PowerShell) + clé DPAPI au démarrage
@@ -416,6 +429,8 @@ src/
 └── renderer/                  Interface (HTML / CSS / JS sans framework)
     ├── index.html
     ├── styles.css
+    ├── danger.js              Règles des commandes dangereuses
+    ├── themes.js              Thèmes (interface, terminal, éditeur)
     └── app.js                 Vues, onglets, panneaux, éditeur, palette, préfixe tmux
 build/
 ├── make-icon.py               Génération de l'icône (PNG + ICO multi-tailles)
@@ -444,7 +459,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-52 tests couvrent :
+55 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -455,6 +470,7 @@ KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 - **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer ;
 - **le verrouillage** : délai d'inactivité, IPC bloqués sauf déverrouillage, anti force brute, vérification du mot de passe, ouverture par clé ;
+- **la sécurité** : détection des commandes dangereuses (et absence de faux positifs courants), journal chiffré (rien en clair, filtres, mauvaise clé, purge), enregistrement chiffré (relecture, export asciicast, limite de taille) ;
 - **le VPN WireGuard** : lecture des `.conf`, SSH de bout en bout à travers un vrai tunnel WireGuard vers un serveur joignable seulement dans le VPN, mauvaise clé serveur, destination hors tunnel ;
 - **les mises à jour** (faux serveur GitHub) : détection, téléchargement, SHA-256, signature falsifiée ou d'une autre clé, archive modifiée ou trop grande, pas de retour arrière de version, extraction et remplacement Windows ;
 - **Windows Hello** (simulé hors Windows) : disponibilité, vérification, annulation, Hello non configuré, clé du coffre jamais stockée en clair.
@@ -523,6 +539,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.9.0** | **Sécurité** : hosts PROD et blocage des commandes dangereuses (confirmation en retapant le nom du host), journal d'audit chiffré (filtres, export CSV, rétention), enregistrement des sessions SSH chiffré avec lecteur intégré et export `.cast` |
 | **1.8.1** | Linux : icône KSTermus fournie dans toutes les tailles standard (16 à 512 px) — elle n'apparaissait pas dans le menu ni le dock ; release automatique GitHub Actions |
 | **1.8.0** | **Thèmes** : 7 thèmes + Automatique (Sombre doux / Clair sépia selon le système), aperçus, appliqués à l'interface, aux terminaux, à l'éditeur et à la barre de titre ; contrastes vérifiés par les tests |
 | **1.7.0** | **VPN WireGuard intégré** : profils `.conf`, association à un host ou à un groupe, démarrage automatique à la connexion, page VPN (état, handshake, trafic, démarrer / arrêter), sans droits administrateur |
