@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.10.0** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.11.0** · Windows et **Linux**
 
 ---
 
@@ -24,6 +24,7 @@
    - [Port forwarding](#port-forwarding)
    - [VPN WireGuard](#vpn-wireguard)
    - [Production, journal d'audit et enregistrements](#production-journal-daudit-et-enregistrements)
+   - [Synchronisation entre PC](#synchronisation-entre-pc)
    - [Known hosts](#known-hosts)
    - [Verrouillage et Windows Hello](#verrouillage-et-windows-hello)
    - [Recherche dans le terminal](#recherche-dans-le-terminal)
@@ -64,6 +65,7 @@
 | **Keychain** | Import OpenSSH / PEM / PuTTY `.ppk`, génération ed25519 / RSA 4096, export, copie de la clé publique |
 | **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
+| **Synchronisation** | Coffre **chiffré** partagé entre tes PC (Windows ↔ Linux) via un dossier cloud ou un dépôt GitHub privé ; fusion automatique, conflits résolus |
 | **Production** | Hosts marqués **PROD** (badge et cadre rouges) ; commande dangereuse (`rm -rf /`, `DROP`, `mkfs`, `reboot`, `git push --force`…) bloquée jusqu'à ce qu'on retape le nom du host |
 | **Audit** | Journal **chiffré** : connexions, commandes, fichiers modifiés, transferts, VPN, secrets consultés, déverrouillages ; filtres, export CSV, rétention |
 | **Enregistrements** | Sessions SSH enregistrées (asciicast chiffré) et **relues dans l'app** (pause, vitesse x1-x8, barre de temps), export `.cast` |
@@ -271,6 +273,24 @@ Fonctionnement : chaque VPN démarré lance `kst-wg` (wireguard-go officiel + pi
 
 **Enregistrements** (*Journal ▸ Enregistrements*) : cocher *Enregistrer les sessions* sur un host (ou *Paramètres ▸ Enregistrement des sessions SSH* : toutes). Tout l'affichage du terminal est enregistré (asciicast v2, chiffré) ; **▶ Relire** ouvre un lecteur (pause, vitesse x1-x8, déplacement dans le temps, temps morts plafonnés à 2 s) ; **⤓** exporte un `.cast` lisible par asciinema. Un mot de passe tapé à une invite masquée n'apparaît pas à l'écran, il n'est donc pas enregistré. Limite : 50 Mo par session.
 
+### Synchronisation entre PC
+
+**Paramètres ▸ Synchronisation entre PC ▸ Activer…**
+
+| Méthode | À renseigner |
+|---|---|
+| 📁 **Dossier cloud** | Un dossier déjà synchronisé (Google Drive, OneDrive, Dropbox, Syncthing, partage réseau) — le même sur chaque PC |
+| 🐙 **GitHub privé** | `propriétaire/dépôt` (privé, sinon refusé) + un jeton *fine-grained* limité à ce dépôt, permission *Contents : Read and write* |
+
+1. **Premier PC** : choisir la méthode et un **mot de passe de synchronisation** (le mot de passe maître convient). KSTermus crée `kstermus-sync.kst`.
+2. **Autres PC** : même méthode, **même mot de passe de synchronisation** (le mot de passe maître de chaque PC peut être différent). Les deux contenus sont fusionnés.
+3. Ensuite tout est automatique : quelques secondes après chaque modification, au déverrouillage et toutes les 5 min. L'indicateur *⟳ Synchro il y a…* (sous le menu) force une synchronisation.
+
+- **Synchronisés** : hosts (mots de passe compris), clés, snippets, tunnels, VPN, known hosts, espaces de travail, thème et réglages de sécurité.
+- **Propres à chaque PC** : historique des éditions, journal d'audit, enregistrements, shell par défaut, dossier de téléchargement.
+- **Fusion à trois voies** (ce PC / fichier partagé / dernier état commun) : un élément modifié d'un seul côté prend cette version (suppression comprise) ; modifié des deux côtés, la version la plus récente gagne ; supprimé d'un côté et modifié de l'autre, la modification est gardée. Deux PC qui écrivent en même temps : relecture et nouvelle fusion automatiques.
+- **Sécurité** : le fichier partagé est chiffré (AES-256-GCM, clé scrypt) ; Drive, OneDrive ou GitHub ne voient rien en clair. La clé dérivée et le jeton GitHub restent dans le coffre chiffré de chaque PC. Pas de commit GitHub quand rien n'a changé.
+
 ### Known hosts
 
 La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la connexion est **bloquée**, avec l'ancienne et la nouvelle empreinte affichées : il peut s'agir d'une réinstallation ou d'une attaque de type *man-in-the-middle*. **Oublier** permet de réaccepter après vérification.
@@ -423,6 +443,7 @@ src/
 │   ├── remote-editor.js       Lecture / écriture de fichiers distants (SFTP ou sudo), conflits
 │   ├── local-pty.js           Terminaux locaux (ConPTY), détection des shells, sessions détachables
 │   ├── lock.js                Verrouillage d'écran : inactivité, filtrage IPC, anti force brute
+│   ├── sync.js                Synchronisation chiffrée (dossier / GitHub), fusion à trois voies
 │   ├── sftp-jobs.js           File de transferts SFTP (dossiers, conflits, annulation)
 │   ├── audit.js               Journal d'audit et enregistrements chiffrés (clé de données du coffre)
 │   ├── vpn.js                 VPN WireGuard : lecture .conf, processus kst-wg, SOCKS5 authentifié
@@ -464,7 +485,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-58 tests couvrent :
+60 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -475,6 +496,7 @@ KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 - **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer ;
 - **le verrouillage** : délai d'inactivité, IPC bloqués sauf déverrouillage, anti force brute, vérification du mot de passe, ouverture par clé ;
+- **la synchronisation** : deux PC aux mots de passe maîtres différents (union, modifications croisées, suppression propagée, conflit → le plus récent, suppression contre modification, aucune écriture inutile, rien en clair), GitHub simulé (jeton refusé, dépôt public refusé, écriture concurrente rejouée, jeton jamais exposé) ;
 - **la file SFTP** : envoi et téléchargement de dossiers complets (fichier vide compris, contenu identique), conflits (ignorer, renommer, remplacer), annulation d'un gros transfert en cours sans casser la navigation ;
 - **la sécurité** : détection des commandes dangereuses (et absence de faux positifs courants), journal chiffré (rien en clair, filtres, mauvaise clé, purge), enregistrement chiffré (relecture, export asciicast, limite de taille) ;
 - **le VPN WireGuard** : lecture des `.conf`, SSH de bout en bout à travers un vrai tunnel WireGuard vers un serveur joignable seulement dans le VPN, mauvaise clé serveur, destination hors tunnel ;
@@ -545,6 +567,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.11.0** | **Synchronisation chiffrée entre PC** (dossier cloud ou GitHub privé) : fusion à trois voies, résolution des conflits, automatique (modification, déverrouillage, 5 min), indicateur et liste des PC |
 | **1.10.0** | **SFTP** : double panneau PC ↔ serveur avec glisser-déposer, dépôt depuis l'explorateur, dossiers complets, file de transferts (vitesse, temps restant, annulation), gestion des conflits, sélection multiple, tri, filtre, raccourcis clavier, chmod, nouveau fichier ; corrigé : double-clic et rafraîchissement après création / renommage / suppression |
 | **1.9.0** | **Sécurité** : hosts PROD et blocage des commandes dangereuses (confirmation en retapant le nom du host), journal d'audit chiffré (filtres, export CSV, rétention), enregistrement des sessions SSH chiffré avec lecteur intégré et export `.cast` |
 | **1.8.1** | Linux : icône KSTermus fournie dans toutes les tailles standard (16 à 512 px) — elle n'apparaissait pas dans le menu ni le dock ; release automatique GitHub Actions |

@@ -18,6 +18,7 @@ const { Updater } = require('./updater');
 const { VpnManager, parseWgConf, describeConf, defaultBinPath } = require('./vpn');
 const { AuditLog, Recorder, newLogKey } = require('./audit');
 const { SftpJobs } = require('./sftp-jobs');
+const { SyncEngine } = require('./sync');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -211,7 +212,8 @@ function publicState() {
     workspaces: d.workspaces || [],
     tunnels: manager.tunnelStatus(),
     vpns: (d.vpns || []).map(({ config, ...v }) => { let info = null; try { info = describeConf(config); } catch (e) { info = { error: e.message }; } return { ...v, info, status: vpnMgr.status(v.id) }; }),
-    groupVpns: d.groupVpns || {}
+    groupVpns: d.groupVpns || {},
+    sync: syncEngine.status()
   };
 }
 
@@ -222,6 +224,7 @@ function handle(channel, fn) {
     try {
       const value = await fn(...args);
       try { auditHook(channel, args, value, null); } catch { /* le journal ne doit jamais casser l'action */ }
+      if (SYNC_TRIGGERS.has(channel)) scheduleSync(8000);
       return { ok: true, value };
     } catch (err) {
       try { auditHook(channel, args, null, err); } catch { /* ignore */ }
@@ -237,7 +240,7 @@ handle('vault:status', () => ({
   helloScreen: vault.isUnlocked() && !!(vault.data.settings || {}).helloScreen,
   version: app.getVersion()
 }));
-function afterUnlock() { lock.unlock(); applyLockSettings(); try { purgeOld(); } catch { /* ignore */ } return publicState(); }
+function afterUnlock() { lock.unlock(); applyLockSettings(); try { purgeOld(); } catch { /* ignore */ } scheduleSync(1500); return publicState(); }
 handle('vault:create', (pw) => { vault.create(pw); return afterUnlock(); });
 handle('vault:unlock', (pw) => {
   lock.checkThrottle();
@@ -318,6 +321,44 @@ handle('settings:save', (s) => {
   return publicState();
 });
 
+// ----- Synchronisation chiffrée entre PC -----
+const syncEngine = new SyncEngine({
+  vault, fetch: (u, o) => net.fetch(u, o), deviceName: os.hostname(), platform: process.platform,
+  emit: (c, p) => { if (win && !win.isDestroyed()) win.webContents.send(c, p); }
+});
+const SYNC_TRIGGERS = new Set(['host:save', 'host:delete', 'host:importSshConfig', 'key:import', 'key:generate', 'key:rename', 'key:delete', 'snippet:save', 'snippet:delete',
+  'forward:save', 'forward:delete', 'vpn:save', 'vpn:delete', 'vpn:setGroup', 'workspace:save', 'workspace:delete', 'knownhost:delete', 'settings:save']);
+let syncTimer = null;
+function scheduleSync(delay = 5000) {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, delay);
+}
+async function runSync() {
+  if (!vault.isUnlocked() || !syncEngine.cfg()) return null;
+  try {
+    const r = await syncEngine.syncNow();
+    if (r.localChanged && win && !win.isDestroyed() && vault.isUnlocked()) win.webContents.send('state:changed', publicState());
+    if (r.conflicts) audit.log('settings', { action: `synchronisation : ${r.conflicts} conflit(s) résolu(s)` });
+    return r;
+  } catch (e) {
+    audit.log('settings', { action: 'synchronisation en échec', error: e.message });
+    return null;
+  }
+}
+setInterval(() => { if (lock.locked) return; runSync(); }, 5 * 60 * 1000).unref();
+handle('sync:status', () => syncEngine.status());
+handle('sync:enable', async (cfg, password) => {
+  const r = await syncEngine.enable(cfg || {}, password);
+  audit.log('settings', { action: 'synchronisation activée', method: cfg && cfg.method });
+  return { result: r, state: publicState() };
+});
+handle('sync:now', async () => { const r = await syncEngine.syncNow(); return { result: r, state: publicState() }; });
+handle('sync:disable', () => { syncEngine.disable(); audit.log('settings', { action: 'synchronisation désactivée' }); return publicState(); });
+handle('sync:pickFolder', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Dossier de synchronisation (Google Drive, OneDrive, Dropbox, Syncthing, partage réseau…)', properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
+});
+
 // ----- Journal d'audit / enregistrements -----
 handle('audit:query', (q) => audit.query(q || {}));
 handle('audit:exportCsv', async (q) => {
@@ -366,7 +407,7 @@ handle('vpn:save', (input) => {
   const config = typeof input.config === 'string' && input.config.trim() ? input.config : existing && existing.config;
   if (!config) throw new Error('Colle ou importe le fichier .conf WireGuard');
   parseWgConf(config); // valide avant d'enregistrer
-  const v = { id: existing ? existing.id : uid(), name, config, notes: input.notes || '' };
+  const v = { id: existing ? existing.id : uid(), name, config, notes: input.notes || '', updatedAt: new Date().toISOString() };
   if (existing) { Object.assign(existing, v); vpnMgr.stop(existing.id); } else d.vpns.push(v);
   vault.save();
   return publicState();
@@ -420,6 +461,7 @@ handle('host:save', (input) => {
     startupCommand: input.startupCommand || '',
     jumpHostId: input.jumpHostId || null,
     vpnId: input.vpnId || '',
+    updatedAt: new Date().toISOString(),
     env: ['dev', 'staging', 'prod'].includes(input.env) ? input.env : '',
     record: !!input.record,
     color: input.color || '',
@@ -516,7 +558,7 @@ handle('key:pickFile', async () => {
 handle('key:import', ({ label, privateKey, passphrase }) => {
   const d = requireUnlocked();
   const info = parsePrivateKey(privateKey, passphrase);
-  d.keys.push({ id: uid(), label: label || info.type, privateKey, passphrase: passphrase || '', createdAt: new Date().toISOString(), ...info });
+  d.keys.push({ id: uid(), label: label || info.type, privateKey, passphrase: passphrase || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...info });
   vault.save();
   return publicState();
 });
@@ -528,14 +570,14 @@ handle('key:generate', ({ label, type, passphrase }) => {
   if (passphrase) { opts.passphrase = passphrase; opts.cipher = 'aes256-ctr'; }
   const kp = sshUtils.generateKeyPairSync(kind, opts);
   const info = parsePrivateKey(kp.private, passphrase);
-  d.keys.push({ id: uid(), label: label || `${kind}-${new Date().toISOString().slice(0, 10)}`, privateKey: kp.private, passphrase: passphrase || '', createdAt: new Date().toISOString(), ...info, publicKey: kp.public.trim() });
+  d.keys.push({ id: uid(), label: label || `${kind}-${new Date().toISOString().slice(0, 10)}`, privateKey: kp.private, passphrase: passphrase || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...info, publicKey: kp.public.trim() });
   vault.save();
   return publicState();
 });
 handle('key:rename', (id, label) => {
   const d = requireUnlocked();
   const k = d.keys.find(x => x.id === id);
-  if (k) { k.label = label; vault.save(); }
+  if (k) { k.label = label; k.updatedAt = new Date().toISOString(); vault.save(); }
   return publicState();
 });
 handle('key:delete', (id) => {
@@ -561,7 +603,7 @@ handle('snippet:save', (s) => {
   const d = requireUnlocked();
   if (!s.command) throw new Error('Commande vide');
   const existing = s.id && d.snippets.find(x => x.id === s.id);
-  const item = { id: existing ? existing.id : uid(), name: (s.name || s.command.slice(0, 40)).trim(), command: s.command, autoRun: !!s.autoRun };
+  const item = { id: existing ? existing.id : uid(), name: (s.name || s.command.slice(0, 40)).trim(), command: s.command, autoRun: !!s.autoRun, updatedAt: new Date().toISOString() };
   if (existing) Object.assign(existing, item); else d.snippets.push(item);
   vault.save();
   return publicState();
@@ -581,7 +623,7 @@ handle('forward:save', (f) => {
     id: existing ? existing.id : uid(), label: f.label || '', type: f.type, hostId: f.hostId,
     bindHost: f.bindHost || '127.0.0.1', bindPort,
     destHost: f.type === 'D' ? '' : f.destHost, destPort: f.type === 'D' ? 0 : Number(f.destPort),
-    autoReconnect: f.autoReconnect !== false
+    autoReconnect: f.autoReconnect !== false, updatedAt: new Date().toISOString()
   };
   if (existing) Object.assign(existing, item); else d.forwards.push(item);
   vault.save();
@@ -625,7 +667,7 @@ handle('workspace:save', (ws) => {
   d.workspaces = d.workspaces || [];
   if (!ws.name || !ws.layout) throw new Error('Nom et disposition requis');
   const existing = d.workspaces.find(w => w.id === ws.id || w.name.toLowerCase() === ws.name.toLowerCase());
-  const item = { id: existing ? existing.id : uid(), name: ws.name.trim().slice(0, 80), layout: ws.layout, broadcast: !!ws.broadcast, savedAt: new Date().toISOString() };
+  const item = { id: existing ? existing.id : uid(), name: ws.name.trim().slice(0, 80), layout: ws.layout, broadcast: !!ws.broadcast, savedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   if (existing) Object.assign(existing, item); else d.workspaces.push(item);
   vault.save();
   return publicState();

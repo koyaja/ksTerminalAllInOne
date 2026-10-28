@@ -145,6 +145,7 @@
 
   function setState(s) {
     S = s;
+    if (S && S.sync !== undefined) renderSyncInd(S.sync);
     const wanted = S && S.settings ? (S.settings.theme && S.settings.theme !== 'dark' ? S.settings.theme : 'auto') : themeId;
     if (wanted !== themeId) applyTheme(wanted);
     renderSection(); renderTabs();
@@ -1096,6 +1097,7 @@
           (() => { const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' } }); c.checked = S.settings.autoReconnect !== false;
             c.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoReconnect: c.checked })); if (s) S = s; }); return c; })()),
         themeRow(),
+        syncRow(),
         updateRow(),
         securityRows(),
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Recherche dans le terminal' }), h('div', { class: 'muted small', text: 'Ctrl+Shift+F ouvre toujours la recherche. Avec Ctrl+F, la touche n\'est plus envoyée au shell (avance d\'un caractère dans bash, page suivante dans vim/less).' })),
@@ -1151,6 +1153,91 @@
     c.addEventListener('change', () => onChange(c));
     return c;
   }
+  // ---------- Synchronisation entre PC ----------
+  function ago(iso) {
+    if (!iso) return 'jamais';
+    const s2 = Math.round((Date.now() - Date.parse(iso)) / 1000);
+    return s2 < 60 ? 'à l\'instant' : s2 < 3600 ? `il y a ${Math.round(s2 / 60)} min` : s2 < 86400 ? `il y a ${Math.round(s2 / 3600)} h` : new Date(iso).toLocaleString('fr-FR');
+  }
+  function renderSyncInd(st) {
+    const b = $('#sync-ind');
+    if (!st || !st.enabled) { b.hidden = true; return; }
+    b.hidden = false;
+    b.className = 'sync-ind' + (st.lastError ? ' err' : '') + (st.running ? ' run' : '');
+    b.textContent = st.running ? '⟳ Synchronisation…' : st.lastError ? '⚠ Synchro en échec' : `⟳ Synchro ${ago(st.lastSync)}`;
+    b.title = st.lastError ? st.lastError : `Synchronisé avec ${st.where}`;
+  }
+  $('#sync-ind').onclick = async () => { const r = await guard(() => api.invoke('sync:now')); if (r) { setState(r.state); syncToast(r.result); } };
+  function syncToast(r) {
+    if (!r) return;
+    const parts = [];
+    if (r.fromRemote) parts.push(`${r.fromRemote} reçu(s)`);
+    if (r.fromLocal) parts.push(`${r.fromLocal} envoyé(s)`);
+    if (r.conflicts) parts.push(`${r.conflicts} conflit(s) résolu(s) (le plus récent gagne)`);
+    toast('Synchronisé' + (parts.length ? ' : ' + parts.join(', ') : ' — rien à changer'));
+  }
+  api.on('sync:status', (st) => { if (S) S.sync = st; renderSyncInd(st); if (ui.section === 'settings' && ui.activeTab === 'home' && $('#sync-info')) $('#sync-info').replaceChildren(...syncInfo(st)); });
+  api.on('state:changed', (s2) => { if (!S || document.querySelector('.backdrop')) { S = s2; return; } setState(s2); toast('Mis à jour depuis un autre PC (synchronisation)'); });
+  setInterval(() => { if (S && S.sync) renderSyncInd(S.sync); }, 30000);
+
+  function syncInfo(st) {
+    if (!st || !st.enabled) return [h('div', { class: 'muted small', text: 'Désactivée. Hosts, clés, snippets, tunnels, VPN et réglages restent sur ce PC.' })];
+    return [
+      h('div', { class: 'small', text: `${st.method === 'github' ? '🐙 GitHub' : '📁 Dossier'} : ${st.where}` }),
+      h('div', { class: 'small' + (st.lastError ? ' err-text' : ''), text: st.lastError ? '⚠ ' + st.lastError : `Dernière synchro : ${ago(st.lastSync)}` + (st.lastStats && st.lastStats.conflicts ? ` · ${st.lastStats.conflicts} conflit(s) résolu(s)` : '') }),
+      st.devices && st.devices.length ? h('div', { class: 'muted small', text: 'PC : ' + st.devices.map(d => `${d.name}${d.id === st.deviceId ? ' (ce PC)' : ''} — ${ago(d.lastSync)}`).join(' · ') }) : null
+    ];
+  }
+  function syncRow() {
+    const st = S.sync || {};
+    return h('div', { class: 'row', style: { alignItems: 'flex-start' } },
+      h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Synchronisation entre PC' }),
+        h('div', { class: 'muted small', text: 'Coffre chiffré partagé entre tes PC (Windows ↔ Linux) via un dossier cloud ou un dépôt GitHub privé. Fusion automatique, à chaque modification et toutes les 5 min.' }),
+        h('div', { id: 'sync-info', class: 'sync-info' }, syncInfo(st))),
+      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' } },
+        st.enabled ? h('button', { class: 'btn sm', onclick: async () => { const r = await guard(() => api.invoke('sync:now')); if (r) { setState(r.state); syncToast(r.result); } } }, '⟳ Synchroniser') : null,
+        h('button', { class: 'btn sm' + (st.enabled ? '' : ' primary'), onclick: () => configureSync() }, st.enabled ? 'Configurer' : 'Activer…'),
+        st.enabled ? h('button', { class: 'btn sm', onclick: async () => {
+          if (!(await confirmBox('Désactiver la synchronisation', 'Ce PC garde ses données mais ne se synchronise plus. Le fichier partagé et les autres PC ne sont pas touchés.', 'Désactiver'))) return;
+          const s2 = await guard(() => api.invoke('sync:disable')); if (s2) { setState(s2); renderSyncInd(s2.sync); }
+        } }, 'Désactiver') : null));
+  }
+  async function configureSync() {
+    const st = S.sync || {};
+    let method = st.method || 'folder';
+    const folder = h('input', { value: st.folder || '', placeholder: 'ex. C:\\Users\\moi\\OneDrive\\KSTermus  ou  ~/Dropbox/KSTermus' });
+    const browse = h('button', { class: 'btn sm', type: 'button', onclick: async () => { const f = await guard(() => api.invoke('sync:pickFolder')); if (f) folder.value = f; } }, 'Parcourir…');
+    const g = st.github || {};
+    const repo = h('input', { value: g.owner ? `${g.owner}/${g.repo}` : '', placeholder: 'koyaja/kstermus-sync' });
+    const branch = h('input', { value: g.branch || 'main' });
+    const token = h('input', { type: 'password', placeholder: g.hasToken ? '•••••• (enregistré — vide = garder)' : 'github_pat_…', autocomplete: 'off' });
+    const pw = h('input', { type: 'password', autocomplete: 'off' });
+    const folderBox = h('div', {}, field('Dossier synchronisé', h('div', { class: 'form-row' }, folder, browse), 'Un dossier déjà synchronisé par Google Drive, OneDrive, Dropbox, Syncthing… ou un partage réseau. Choisis le même sur chaque PC.'));
+    const ghBox = h('div', {},
+      h('div', { class: 'form-row' }, field('Dépôt privé (propriétaire/nom)', repo), h('div', { class: 'narrow' }, field('Branche', branch))),
+      field('Jeton GitHub', secretInput(token, { copy: false }), 'GitHub ▸ Settings ▸ Developer settings ▸ Fine-grained tokens : accès à CE dépôt seulement, permission « Contents : Read and write ». Le jeton reste chiffré dans le coffre.'));
+    const seg = h('div', { class: 'seg' },
+      h('button', { type: 'button', class: method === 'folder' ? 'on' : '', onclick: (e) => setM('folder', e) }, '📁 Dossier cloud'),
+      h('button', { type: 'button', class: method === 'github' ? 'on' : '', onclick: (e) => setM('github', e) }, '🐙 GitHub privé'));
+    function setM(m, e) { method = m; seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget)); folderBox.hidden = m !== 'folder'; ghBox.hidden = m !== 'github'; }
+    folderBox.hidden = method !== 'folder'; ghBox.hidden = method !== 'github';
+    const r = await modal({
+      title: 'Synchronisation entre PC', wide: true,
+      body: [seg, h('div', { style: { height: '10px' } }), folderBox, ghBox,
+        field('Mot de passe de synchronisation', secretInput(pw, { copy: false }), st.enabled ? 'Le même que sur les autres PC (celui choisi lors de la première activation).' : 'Premier PC : choisis-le (ton mot de passe maître convient). Autres PC : le même. Il chiffre le fichier partagé.'),
+        h('p', { class: 'muted small', text: 'Synchronisés : hosts, clés, snippets, tunnels, VPN, known hosts, espaces de travail, thème et réglages de sécurité. Restent sur ce PC : historique des éditions, journal d\'audit, enregistrements, shell par défaut, dossier de téléchargement.' })],
+      actions: [{ label: 'Annuler', value: null }, { label: st.enabled ? 'Enregistrer et synchroniser' : 'Activer', class: 'primary', submit: true, onClick: async () => {
+        const [owner, name] = repo.value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').split('/');
+        const cfg = method === 'folder' ? { method, folder: folder.value.trim() } : { method, github: { owner, repo: name, branch: branch.value.trim() || 'main', token: token.value.trim() } };
+        if (method === 'folder' && !cfg.folder) { toast('Choisis un dossier', true); return false; }
+        if (method === 'github' && (!owner || !name)) { toast('Dépôt au format propriétaire/nom', true); return false; }
+        try { return await api.invoke('sync:enable', cfg, pw.value); } catch (ex) { toast(ex.message, true); return false; }
+      } }]
+    });
+    if (!r) return;
+    setState(r.state); renderSyncInd(r.state.sync); syncToast(r.result);
+  }
+
   function settingSelect(title, desc, key, def, options, numeric) {
     const sel = h('select', { style: { width: '220px' } }, options.map(([v, l]) => h('option', { value: String(v), text: l })));
     sel.value = String(S.settings[key] === undefined ? def : S.settings[key]);

@@ -686,6 +686,104 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.deepStrictEqual(TH.auto, { dark: 'doux', light: 'sepia' });
   });
 
+  console.log('Synchronisation entre PC');
+  {
+    const { SyncEngine, FILE_NAME } = require('../src/main/sync');
+    const mkPc = (name, pw) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-pc-')); const v = new Vault(d); v.create(pw); return { v, eng: new SyncEngine({ vault: v, fetch: null, deviceName: name, platform: 'test' }) }; };
+    const T = (s) => new Date(Date.UTC(2026, 9, 28, 10, 0, s)).toISOString();
+    await test('sync (dossier) : deux PC, mots de passe maîtres différents, fusion dans les deux sens', async () => {
+      const shared = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-cloud-'));
+      const A = mkPc('VIVOBOOK', 'Maitre-Windows-1'), B = mkPc('koyaja-linux', 'Maitre-Linux-22');
+      A.v.data.hosts.push({ id: 'h1', label: 'ProdKS', hostname: '176.57.189.161', password: 'secret-prod', updatedAt: T(1) }, { id: 'h2', label: 'QOS PROD 1', hostname: '82.165.51.135', updatedAt: T(1) });
+      A.v.data.settings.theme = 'doux'; A.v.data.settings.defaultShell = 'pwsh'; A.v.save();
+      B.v.data.hosts.push({ id: 'h9', label: 'Serveur Linux seul', hostname: '10.0.0.9', updatedAt: T(2) }); B.v.data.settings.defaultShell = 'bash'; B.v.save();
+      const r1 = await A.eng.enable({ method: 'folder', folder: shared }, 'Sync-Pass-2026');
+      assert.ok(fs.existsSync(path.join(shared, FILE_NAME)));
+      const raw = fs.readFileSync(path.join(shared, FILE_NAME), 'utf8');
+      assert.ok(!raw.includes('secret-prod') && !raw.includes('ProdKS') && !raw.includes('176.57'), 'rien en clair dans le dossier partagé');
+      assert.strictEqual(r1.localChanged, false);
+      await assert.rejects(B.eng.enable({ method: 'folder', folder: shared }, 'mauvais-mot-de-passe'), /incorrect/);
+      await B.eng.enable({ method: 'folder', folder: shared }, 'Sync-Pass-2026');
+      assert.deepStrictEqual(B.v.data.hosts.map(h => h.id).sort(), ['h1', 'h2', 'h9']);
+      assert.strictEqual(B.v.data.hosts.find(h => h.id === 'h1').password, 'secret-prod');
+      assert.strictEqual(B.v.data.settings.theme, 'doux', 'réglage partagé synchronisé');
+      assert.strictEqual(B.v.data.settings.defaultShell, 'bash', 'réglage propre au PC conservé');
+      await A.eng.syncNow();
+      assert.deepStrictEqual(A.v.data.hosts.map(h => h.id).sort(), ['h1', 'h2', 'h9'], 'A reçoit le host créé sur B');
+      assert.strictEqual(A.v.data.settings.defaultShell, 'pwsh');
+      // modifications indépendantes des deux côtés
+      A.v.data.hosts.find(h => h.id === 'h2').label = 'QOS PROD 1 (renommé)'; A.v.data.hosts.find(h => h.id === 'h2').updatedAt = T(10); A.v.save();
+      B.v.data.snippets.push({ id: 's1', name: 'disque', command: 'df -h', updatedAt: T(11) }); B.v.save();
+      await A.eng.syncNow(); await B.eng.syncNow(); await A.eng.syncNow();
+      for (const P of [A, B]) {
+        assert.strictEqual(P.v.data.hosts.find(h => h.id === 'h2').label, 'QOS PROD 1 (renommé)');
+        assert.strictEqual(P.v.data.snippets.length, 1);
+      }
+      // suppression propagée
+      A.v.data.hosts = A.v.data.hosts.filter(h => h.id !== 'h9'); A.v.save();
+      await A.eng.syncNow(); const rb = await B.eng.syncNow();
+      assert.ok(!B.v.data.hosts.some(h => h.id === 'h9'), 'suppression propagée'); assert.strictEqual(rb.localChanged, true);
+      // conflit : même host modifié des deux côtés → le plus récent gagne
+      A.v.data.hosts.find(h => h.id === 'h1').hostname = '1.1.1.1'; A.v.data.hosts.find(h => h.id === 'h1').updatedAt = T(20); A.v.save();
+      B.v.data.hosts.find(h => h.id === 'h1').hostname = '2.2.2.2'; B.v.data.hosts.find(h => h.id === 'h1').updatedAt = T(30); B.v.save();
+      await A.eng.syncNow(); const rc = await B.eng.syncNow(); await A.eng.syncNow();
+      assert.strictEqual(rc.conflicts, 1);
+      assert.strictEqual(A.v.data.hosts.find(h => h.id === 'h1').hostname, '2.2.2.2');
+      assert.strictEqual(B.v.data.hosts.find(h => h.id === 'h1').hostname, '2.2.2.2');
+      // suppression d'un côté, modification de l'autre → la modification gagne
+      A.v.data.hosts = A.v.data.hosts.filter(h => h.id !== 'h2'); A.v.save();
+      B.v.data.hosts.find(h => h.id === 'h2').port = 2222; B.v.data.hosts.find(h => h.id === 'h2').updatedAt = T(40); B.v.save();
+      await A.eng.syncNow(); await B.eng.syncNow(); await A.eng.syncNow();
+      assert.strictEqual(A.v.data.hosts.find(h => h.id === 'h2').port, 2222);
+      // rien à faire : pas de réécriture du fichier distant
+      const m0 = fs.statSync(path.join(shared, FILE_NAME)).mtimeMs; await sleep(20);
+      const rn = await A.eng.syncNow();
+      assert.strictEqual(rn.localChanged, false); assert.strictEqual(fs.statSync(path.join(shared, FILE_NAME)).mtimeMs, m0, 'pas d\'écriture inutile');
+      assert.deepStrictEqual(A.eng.status().devices.map(d => d.name).sort(), ['VIVOBOOK', 'koyaja-linux']);
+      assert.ok(!JSON.stringify(A.eng.status()).includes(A.v.data.sync.key), 'la clé ne sort pas du coffre');
+    });
+    await test('sync (GitHub privé) : création, lecture, écriture concurrente rejouée, dépôt public refusé', async () => {
+      const store = { sha: null, content: null, writes: 0, private: true, conflictOnce: false };
+      const gh = http.createServer((req, res) => {
+        let body = ''; req.on('data', c => body += c); req.on('end', () => {
+          if (req.headers.authorization !== 'Bearer ghp_TEST') { res.statusCode = 401; return res.end('{}'); }
+          if (req.method === 'GET' && req.url === '/repos/koyaja/kst-sync') return res.end(JSON.stringify({ private: store.private }));
+          if (req.url.startsWith('/repos/koyaja/kst-sync/contents/')) {
+            if (req.method === 'GET') { if (!store.content) { res.statusCode = 404; return res.end('{}'); } return res.end(JSON.stringify({ sha: store.sha, content: store.content })); }
+            if (req.method === 'PUT') {
+              const b = JSON.parse(body);
+              if (store.conflictOnce) { store.conflictOnce = false; res.statusCode = 409; return res.end('{}'); }
+              if ((b.sha || null) !== store.sha) { res.statusCode = 409; return res.end('{}'); }
+              store.content = b.content; store.sha = crypto2.randomBytes(20).toString('hex'); store.writes++;
+              return res.end(JSON.stringify({ content: { sha: store.sha } }));
+            }
+          }
+          res.statusCode = 404; res.end('{}');
+        });
+      });
+      await new Promise(r => gh.listen(0, '127.0.0.1', r));
+      const apiBase = `http://127.0.0.1:${gh.address().port}`;
+      try {
+        const mk = (n) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-gh-')); const v = new Vault(d); v.create('Maitre-' + n + '-123'); return { v, eng: new SyncEngine({ vault: v, fetch: (u, o) => fetch(u, o), deviceName: n, platform: 'test' }) }; };
+        const A = mk('A'), B = mk('B');
+        A.v.data.hosts.push({ id: 'g1', label: 'Via GitHub', hostname: '9.9.9.9', password: 'pw-gh', updatedAt: T(1) }); A.v.save();
+        const cfg = { method: 'github', github: { owner: 'koyaja', repo: 'kst-sync', token: 'ghp_TEST', apiBase } };
+        await assert.rejects(A.eng.enable({ ...cfg, github: { ...cfg.github, token: 'faux' } }, 'Sync-Pass-2026'), /Jeton GitHub refusé/);
+        store.private = false;
+        await assert.rejects(A.eng.enable(cfg, 'Sync-Pass-2026'), /PUBLIC/);
+        store.private = true;
+        await A.eng.enable(cfg, 'Sync-Pass-2026');
+        assert.strictEqual(store.writes, 1);
+        assert.ok(!Buffer.from(store.content, 'base64').toString().includes('pw-gh'), 'chiffré sur GitHub');
+        store.conflictOnce = true; // un autre PC écrit en même temps
+        await B.eng.enable(cfg, 'Sync-Pass-2026');
+        assert.strictEqual(B.v.data.hosts[0].label, 'Via GitHub');
+        assert.ok(!JSON.stringify(B.eng.status()).includes('ghp_TEST'), 'jeton jamais exposé');
+        assert.strictEqual(B.eng.status().github.hasToken, true);
+      } finally { gh.close(); }
+    });
+  }
+
   console.log('Sauvegarde / restauration');
   await test('export complet (coffre + historique) puis restauration sur un autre PC', async () => {
     const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-win-'));
