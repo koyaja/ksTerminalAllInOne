@@ -143,7 +143,12 @@
   const ui = { section: 'hosts', search: '', activeTab: 'home', lastTerm: null, shells: [], prefixAt: 0, localSessions: [] };
   const tabs = new Map();      // id -> session
 
-  function setState(s) { S = s; renderSection(); renderTabs(); }
+  function setState(s) {
+    S = s;
+    const wanted = S && S.settings ? (S.settings.theme && S.settings.theme !== 'dark' ? S.settings.theme : 'auto') : themeId;
+    if (wanted !== themeId) applyTheme(wanted);
+    renderSection(); renderTabs();
+  }
 
   // ---------- Verrouillage ----------
   let lockWrapped = false;
@@ -950,6 +955,7 @@
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Reconnexion automatique SSH' }), h('div', { class: 'muted small', text: 'Après une coupure réseau ou une mise en veille : nouvel essai à 2, 4, 8, 15 puis 30 s.' })),
           (() => { const c = h('input', { type: 'checkbox', style: { width: '18px', height: '18px' } }); c.checked = S.settings.autoReconnect !== false;
             c.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoReconnect: c.checked })); if (s) S = s; }); return c; })()),
+        themeRow(),
         updateRow(),
         securityRows(),
         h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Recherche dans le terminal' }), h('div', { class: 'muted small', text: 'Ctrl+Shift+F ouvre toujours la recherche. Avec Ctrl+F, la touche n\'est plus envoyée au shell (avance d\'un caractère dans bash, page suivante dans vim/less).' })),
@@ -969,6 +975,34 @@
             h('button', { class: 'btn sm', onclick: restoreFromSettings }, 'Restaurer…'))),
         h('div', { class: 'row', style: { alignItems: 'flex-start' } }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Raccourcis clavier' }),
           h('div', { class: 'kbd-list' }, SHORTCUTS.map(([k, d]) => h('div', { class: 'kbd-row' }, h('kbd', { text: k }), h('span', { text: d }))))))));
+  }
+
+  function themeRow() {
+    const TH = window.KST_THEMES;
+    const order = ['auto', 'doux', 'sepia', 'nord', 'solarized', 'kstermus', 'clair', 'contraste'];
+    const sysLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+    const card = (id) => {
+      const t = TH.themes[TH.resolve(id)];
+      const isAuto = id === 'auto';
+      const k = t.term;
+      const mini = (kk, compact) => h('div', { class: 'th-preview', style: { background: kk.background, color: kk.foreground } },
+        h('div', {}, h('span', { style: { color: kk.green }, text: compact ? 'kst' : 'kst@prod' }), h('span', { text: ':' }), h('span', { style: { color: kk.blue }, text: '~' }), h('span', { text: '$ ls' })),
+        h('div', {}, h('span', { style: { color: kk.blue }, text: 'app ' }), h('span', { style: { color: kk.yellow }, text: 'logs ' }), compact ? null : h('span', { style: { color: kk.red }, text: 'err' })));
+      const preview = isAuto ? h('div', { class: 'th-duo' }, mini(TH.themes.doux.term, true), mini(TH.themes.sepia.term, true)) : mini(k, false);
+      const ratio = TH.contrast(k.foreground, k.background).toFixed(1);
+      const badge = isAuto ? h('span', { class: 'th-badge', text: '★ Recommandé' })
+        : t.recommended ? h('span', { class: 'th-badge soft', text: t.recommended === 'nuit' ? '☾ soir' : '☀ journée' }) : null;
+      return h('button', { class: 'th-card' + (themeId === id ? ' sel' : ''), type: 'button', onclick: async () => {
+        const s = await applyTheme(id, { save: true });
+        if (s) { S = s; renderSection(); }
+      } }, preview,
+        h('div', { class: 'th-name' }, h('span', { text: isAuto ? 'Automatique' : t.name }), badge),
+        h('div', { class: 'th-desc', text: isAuto ? `Suit le mode clair/sombre de ${api.platform === 'win32' ? 'Windows' : 'ton système'} : Sombre doux le soir, Clair sépia le jour (actuellement : ${sysLight ? 'Clair sépia' : 'Sombre doux'}).` : `${t.desc} Contraste ${ratio}:1.` }));
+    };
+    return h('div', { class: 'row', style: { alignItems: 'flex-start', flexDirection: 'column' } },
+      h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Thème' }),
+        h('div', { class: 'muted small', text: 'Interface, terminaux et éditeur. Pour les yeux : un contraste modéré (7 à 11:1) fatigue moins que du blanc pur sur noir pur ; règle aussi la luminosité de l\'écran sur celle de la pièce et active l\'éclairage nocturne du système le soir.' })),
+      h('div', { class: 'th-grid' }, order.map(card)));
   }
 
   function checkbox(checked, onChange) {
@@ -1256,11 +1290,26 @@
   }
 
   // ---------- Terminal (avec split) ----------
-  const TERM_THEME = {
-    background: '#0b0f14', foreground: '#e6edf3', cursor: '#2dd4a7', cursorAccent: '#0b0f14', selectionBackground: '#2dd4a744',
-    black: '#1b2430', red: '#f2555a', green: '#2dd4a7', yellow: '#f5b84a', blue: '#5ab0ff', magenta: '#c39bff', cyan: '#56d4e8', white: '#d0d7de',
-    brightBlack: '#5c6b7c', brightRed: '#ff7a7f', brightGreen: '#5ef0c4', brightYellow: '#ffd27a', brightBlue: '#8cc8ff', brightMagenta: '#d8bcff', brightCyan: '#8ce8f5', brightWhite: '#ffffff'
-  };
+  // ---------- Thèmes ----------
+  let TERM_THEME = null;
+  let themeId = 'auto';
+  function applyTheme(id, { save = false } = {}) {
+    const TH = window.KST_THEMES;
+    themeId = !id || id === 'dark' ? 'auto' : id; // 'dark' : valeur par défaut des anciens coffres
+    const rid = TH.resolve(themeId);
+    const t = TH.themes[rid];
+    const root = document.documentElement;
+    for (const [k, v] of Object.entries(TH.cssVars(t))) root.style.setProperty(k, v);
+    document.body.classList.toggle('theme-light', !!t.light);
+    root.style.colorScheme = t.light ? 'light' : 'dark';
+    TERM_THEME = { ...t.term, cursorAccent: t.term.background };
+    for (const p of panes.values()) p.term.options.theme = TERM_THEME;
+    try { localStorage.setItem('kst-theme', themeId); } catch { /* ignore */ }
+    api.invoke('window:theme', { color: t.ui.bg2, symbolColor: t.ui.muted, background: t.ui.bg }).catch(() => {});
+    if (save) return guard(() => api.invoke('settings:save', { theme: themeId }));
+    return null;
+  }
+  try { if (window.matchMedia) window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (themeId === 'auto') applyTheme('auto'); }); } catch { /* ignore */ }
 
   function fitTab(t) { if (t.kind === 'term') for (const p of t.panes.values()) p.fit(); }
 
@@ -2636,5 +2685,9 @@
   });
   window.addEventListener('beforeunload', () => { for (const id of [...tabs.keys()]) disposeTab(id); });
 
+  // Thème appliqué avant l'écran de verrouillage (mémorisé localement, sans secret).
+  let savedTheme = 'auto';
+  try { savedTheme = localStorage.getItem('kst-theme') || 'auto'; } catch { /* ignore */ }
+  applyTheme(savedTheme);
   initLock();
 })();

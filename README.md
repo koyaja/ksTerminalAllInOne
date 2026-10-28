@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.7.0** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.8.0** · Windows et **Linux**
 
 ---
 
@@ -64,6 +64,7 @@
 | **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
 | **Sécurité** | Coffre AES-256-GCM + scrypt, vérification des empreintes serveur (TOFU), alerte bloquante si une empreinte change |
+| **Thèmes** | 7 thèmes + **Automatique** (suit le mode clair/sombre du système) : Sombre doux, Clair sépia, Nord, Solarized, KSTermus, Clair, Contraste élevé — interface, terminaux et éditeur |
 | **Fenêtre** | Barre de titre intégrée, taille/position mémorisées, instance unique, confirmation à la fermeture, plein écran |
 
 ---
@@ -294,6 +295,23 @@ KSTermus interroge les [releases GitHub](https://github.com/koyaja/ksTerminalAll
 - Jamais de retour à une version plus ancienne. Le remplacement garde l'ancienne version tant que la nouvelle n'est pas en place (retour arrière en cas d'échec). Journal : `%TEMP%\kstermus-update\update.log`.
 - En mode développement (`npm start`), l'archive est seulement téléchargée : l'installation automatique ne concerne que la version installée.
 
+### Thèmes et confort visuel
+
+**Paramètres ▸ Thème** : aperçu de chaque thème, appliqué immédiatement à l'interface, aux terminaux, à l'éditeur et à la barre de titre (mémorisé dès l'écran de verrouillage).
+
+| Thème | Contraste texte | Pour qui / quand |
+|---|---|---|
+| **Automatique** ★ | — | Suit Windows / Linux : *Sombre doux* en mode sombre, *Clair sépia* en mode clair |
+| Sombre doux | 8,1:1 | Soir, pièce sombre — gris chaud, couleurs atténuées (Gruvbox Material) |
+| Clair sépia | 10,7:1 | Journée, pièce lumineuse — papier chaud, pas de blanc éclatant |
+| Nord | 9,2:1 | Sombre bleu-gris, calme |
+| Solarized sombre | 5,6:1 | Très faible contraste, reposant mais terne |
+| KSTermus | 16,3:1 | Sombre d'origine, contraste fort |
+| Clair | 15,8:1 | Écran très lumineux, bureau éclairé |
+| Contraste élevé | 21:1 | Basse vision, plein soleil |
+
+Pour les yeux, ce n'est pas un thème en soi qui protège : un **contraste modéré** (7 à 11:1) fatigue moins que du blanc pur sur noir pur, l'**écran doit être aussi lumineux que la pièce** (sombre le soir, clair le jour : d'où *Automatique*), et l'**éclairage nocturne** de Windows / Linux limite la lumière bleue le soir. Règle 20-20-20 : toutes les 20 min, regarder à 6 m pendant 20 s.
+
 ---
 
 ## Raccourcis clavier
@@ -426,7 +444,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-51 tests couvrent :
+52 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -499,6 +517,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.8.0** | **Thèmes** : 7 thèmes + Automatique (Sombre doux / Clair sépia selon le système), aperçus, appliqués à l'interface, aux terminaux, à l'éditeur et à la barre de titre ; contrastes vérifiés par les tests |
 | **1.7.0** | **VPN WireGuard intégré** : profils `.conf`, association à un host ou à un groupe, démarrage automatique à la connexion, page VPN (état, handshake, trafic, démarrer / arrêter), sans droits administrateur |
 | **1.6.0** | **Restauration d'une sauvegarde** depuis l'écran de verrouillage ou les Paramètres (Windows ↔ Linux), export complet coffre + historique, ancien coffre conservé, anciens exports acceptés |
 | **1.5.1** | **Version Linux** (AppImage, .deb, .tar.gz) ; sous Linux, mise à jour notifiée avec lien vers la release au lieu de télécharger le zip Windows |

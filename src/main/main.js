@@ -644,16 +644,18 @@ function activeCount() {
 
 function createWindow() {
   const st = loadWindowState();
+  let winTheme = { color: '#2b2927', symbolColor: '#a89984', background: '#252423' };
+  try { winTheme = { ...winTheme, ...JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'theme-window.json'), 'utf8')) }; } catch { /* défaut */ }
   win = new BrowserWindow({
     ...st.bounds,
     minWidth: 960,
     minHeight: 600,
     show: false,
-    backgroundColor: '#0f1419',
+    backgroundColor: winTheme.background,
     title: 'KSTermus',
     icon: path.join(__dirname, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#141b23', symbolColor: '#c9d4df', height: TITLEBAR_H },
+    titleBarOverlay: { color: winTheme.color, symbolColor: winTheme.symbolColor, height: TITLEBAR_H },
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
@@ -726,6 +728,18 @@ handle('update:install', () => {
   return true;
 });
 handle('update:openPage', () => { shell.openExternal(updater.state.page || 'https://github.com/koyaja/ksTerminalAllInOne/releases'); return true; });
+// Couleurs de la barre de titre selon le thème (mémorisées pour le prochain lancement).
+const themeFile = path.join(app.getPath('userData'), 'theme-window.json');
+handle('window:theme', ({ color, symbolColor, background }) => {
+  const ok = (c) => typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c);
+  if (!ok(color) || !ok(symbolColor) || !ok(background)) throw new Error('Couleurs invalides');
+  if (win && !win.isDestroyed()) {
+    try { win.setTitleBarOverlay({ color, symbolColor, height: TITLEBAR_H }); } catch { /* plateforme sans overlay */ }
+    win.setBackgroundColor(background);
+  }
+  try { fs.writeFileSync(themeFile, JSON.stringify({ color, symbolColor, background })); } catch { /* ignore */ }
+  return true;
+});
 handle('window:info', () => ({ platform: process.platform, titlebarHeight: TITLEBAR_H, maximized: win ? win.isMaximized() : false, version: app.getVersion() }));
 
 // Une seule instance : relancer l'app remet la fenêtre existante au premier plan.

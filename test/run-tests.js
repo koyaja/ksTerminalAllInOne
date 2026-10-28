@@ -546,6 +546,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     });
   } else console.log('  (tests VPN de bout en bout ignorés : binaires kst-wg absents)');
 
+  console.log('Thèmes');
+  await test('thèmes : contrastes lisibles, thèmes recommandés « doux » (7 à 12:1)', async () => {
+    const TH = require('../src/renderer/themes.js');
+    for (const [id, t] of Object.entries(TH.themes)) {
+      assert.ok(TH.contrast(t.term.foreground, t.term.background) >= 4.5, id + ' : texte du terminal trop peu contrasté');
+      assert.ok(TH.contrast(t.ui.text, t.ui.bg2) >= 4.5, id + ' : texte de l\'interface trop peu contrasté');
+      assert.ok(TH.contrast(t.ui.muted, t.ui.bg2) >= 4.5, id + ' : texte secondaire illisible');
+      for (const k of ['background', 'foreground', 'red', 'green', 'blue', 'yellow']) assert.match(t.term[k], /^#[0-9a-f]{6}$/i, id + '.' + k);
+    }
+    for (const id of ['doux', 'sepia']) {
+      const t = TH.themes[id], c = TH.contrast(t.term.foreground, t.term.background);
+      assert.ok(c >= 7 && c <= 12, `${id} : contraste ${c.toFixed(1)} hors de la zone confortable`);
+    }
+    assert.deepStrictEqual(TH.auto, { dark: 'doux', light: 'sepia' });
+  });
+
   console.log('Sauvegarde / restauration');
   await test('export complet (coffre + historique) puis restauration sur un autre PC', async () => {
     const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-win-'));

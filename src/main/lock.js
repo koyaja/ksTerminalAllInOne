@@ -5,7 +5,7 @@
 
 const ALLOWED_WHEN_LOCKED = new Set([
   'vault:status', 'vault:unlock', 'vault:create', 'vault:unlockScreen', 'vault:lock',
-  'hello:status', 'hello:unlock', 'window:control', 'window:info', 'lock:screen'
+  'hello:status', 'hello:unlock', 'window:control', 'window:info', 'window:theme', 'lock:screen'
 ]);
 
 class LockController {

@@ -19,7 +19,7 @@ function emptyData() {
     forwards: [],
     knownHosts: {},
     editHistory: {},
-    settings: { fontSize: 14, theme: 'dark' }
+    settings: { fontSize: 14, theme: 'auto' }
   };
 }
 
