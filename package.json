@@ -1,7 +1,7 @@
 {
   "name": "kstermus",
   "productName": "KSTermus",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "Client SSH / SFTP avec keychain chiffré, snippets et port forwarding",
   "author": "CYBERISK",
   "license": "UNLICENSED",

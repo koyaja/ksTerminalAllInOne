@@ -1,5 +1,5 @@
 'use strict';
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const invoke = async (channel, ...args) => {
   const r = await ipcRenderer.invoke(channel, ...args);
@@ -23,5 +23,7 @@ contextBridge.exposeInMainWorld('kst', {
   activity: () => ipcRenderer.send('app:activity'),
   auditCommand: (sessionId, command, danger, local) => ipcRenderer.send('audit:command', { sessionId, command, danger, local }),
   auditDangerCancelled: (sessionId, command, reasons) => ipcRenderer.send('audit:dangerCancelled', { sessionId, command, reasons }),
+  // Chemin d'un fichier déposé depuis l'explorateur (glisser-déposer)
+  pathForFile: (file) => { try { return webUtils.getPathForFile(file) || ''; } catch { return ''; } },
   platform: process.platform
 });

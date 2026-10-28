@@ -472,3 +472,33 @@ table.audit tr.t-connect-failed td, table.audit tr.t-unlock-failed td { backgrou
 .player-bar { display: flex; align-items: center; gap: 8px; }
 .player-bar input[type=range] { flex: 1; padding: 0; }
 .player-bar .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 96px; text-align: right; }
+
+/* ---------- 1.10.0 : SFTP double panneau ---------- */
+.fpanes { flex: 1; min-height: 0; display: flex; gap: 1px; background: var(--line); }
+.fpane { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); position: relative; }
+.fpane-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--bg-2); border-bottom: 1px solid var(--line); }
+.fpane-title { font-weight: 600; font-size: 12.5px; white-space: nowrap; margin-right: 4px; }
+.fpane .roots { width: 44px; padding: 4px; }
+.fpane .sftp-table-wrap { outline: none; }
+.fpane .sftp-table-wrap:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent); }
+.fpane .drop-hint { display: none; position: absolute; inset: 44px 10px 10px; border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); font-weight: 600; place-items: center; pointer-events: none; }
+.fpane.dropping .drop-hint { display: grid; }
+table.files tr.drop-into td { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+table.files th.sortable { cursor: pointer; user-select: none; }
+table.files th.sortable.on { color: var(--text); }
+table.files .ficon { display: inline-block; width: 22px; }
+.sftp-filter { width: 170px; padding: 5px 9px; font-size: 12.5px; }
+.session-bar .icon-btn.on, .session-bar .btn.on { color: var(--accent); border-color: var(--accent); }
+.tqueue { border-top: 1px solid var(--line); background: var(--bg-2); max-height: 210px; display: flex; flex-direction: column; }
+.q-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; font-weight: 600; }
+.q-list { overflow-y: auto; }
+.transfer .qinfo { flex: 1; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.transfer .bar { flex: 0 0 160px; }
+.transfer.q-error .bar > i { background: var(--danger); }
+.transfer.q-error .qinfo { color: var(--danger); }
+.transfer.q-cancelled { opacity: .6; }
+.transfer.q-done .bar > i { background: color-mix(in srgb, var(--accent) 60%, var(--bg-4)); }
+.chmod-grid { display: grid; grid-template-columns: 120px repeat(3, 1fr); gap: 8px 12px; align-items: center; justify-items: start; }
+.chmod-grid b { font-size: 12px; color: var(--muted); font-weight: 600; }
+.chmod-grid input[type=checkbox] { width: 18px; height: 18px; }
+.conflict-list { white-space: pre; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; max-height: 200px; overflow: auto; }

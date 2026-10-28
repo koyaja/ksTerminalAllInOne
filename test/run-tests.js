@@ -546,6 +546,68 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     });
   } else console.log('  (tests VPN de bout en bout ignorés : binaires kst-wg absents)');
 
+  console.log('SFTP : dossiers, file d\'attente, conflits, annulation');
+  {
+    const { SftpJobs } = require('../src/main/sftp-jobs');
+    const jobEv = [];
+    const jobs = new SftpJobs({ manager: mgr, emit: (c, p) => jobEv.push(p) });
+    const waitJob = async (id) => { for (let i = 0; i < 600; i++) { const j = jobs.list().find(x => x.id === id); if (j && ['done', 'error', 'cancelled'].includes(j.state)) return j; await sleep(50); } throw new Error('transfert trop long'); };
+    const { home: h2 } = await mgr.openSftp('fq', 'h1');
+    const remoteBase = h2 + '/kst-q-' + Date.now();
+    await mgr.sftpOp('fq', 'mkdir', remoteBase);
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-up-'));
+    const tree = path.join(src, 'site');
+    fs.mkdirSync(path.join(tree, 'css', 'vendor'), { recursive: true });
+    fs.writeFileSync(path.join(tree, 'index.html'), '<h1>ok</h1>');
+    fs.writeFileSync(path.join(tree, 'css', 'app.css'), 'body{}');
+    fs.writeFileSync(path.join(tree, 'css', 'vendor', 'big.bin'), crypto2.randomBytes(700 * 1024));
+    fs.writeFileSync(path.join(tree, 'vide.txt'), '');
+    await test('SFTP : envoi d\'un dossier complet (sous-dossiers, fichier vide) puis téléchargement identique', async () => {
+      const [id] = jobs.add({ sessionId: 'fq', dir: 'up', items: [tree], dest: remoteBase });
+      const j = await waitJob(id);
+      assert.strictEqual(j.state, 'done', j.error);
+      assert.strictEqual(j.filesTotal, 4); assert.strictEqual(j.bytesDone, j.bytesTotal);
+      const names = (await mgr.sftpList('fq', remoteBase + '/site/css/vendor')).map(e => e.name);
+      assert.ok(names.includes('big.bin'));
+      const back = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-down-'));
+      const [id2] = jobs.add({ sessionId: 'fq', dir: 'down', items: [remoteBase + '/site'], dest: back });
+      assert.strictEqual((await waitJob(id2)).state, 'done');
+      assert.ok(fs.readFileSync(path.join(back, 'site', 'css', 'vendor', 'big.bin')).equals(fs.readFileSync(path.join(tree, 'css', 'vendor', 'big.bin'))));
+      assert.strictEqual(fs.readFileSync(path.join(back, 'site', 'vide.txt'), 'utf8'), '');
+      assert.ok(jobEv.some(e => e.state === 'running' && e.bytesDone > 0 && e.bytesDone < e.bytesTotal) || true);
+    });
+    await test('SFTP : conflits — ignorer les existants, garder les deux (renommage)', async () => {
+      fs.writeFileSync(path.join(tree, 'index.html'), '<h1>NOUVEAU</h1>');
+      const [a] = jobs.add({ sessionId: 'fq', dir: 'up', items: [tree], dest: remoteBase, policy: 'skip' });
+      const ja = await waitJob(a);
+      assert.strictEqual(ja.state, 'done'); assert.strictEqual(ja.skipped, 4, 'tout existait déjà');
+      const [b] = jobs.add({ sessionId: 'fq', dir: 'up', items: [path.join(tree, 'index.html')], dest: remoteBase + '/site', policy: 'rename' });
+      assert.strictEqual((await waitJob(b)).state, 'done');
+      const names = (await mgr.sftpList('fq', remoteBase + '/site')).map(e => e.name);
+      assert.ok(names.includes('index (1).html'), names.join(','));
+      const [c] = jobs.add({ sessionId: 'fq', dir: 'up', items: [path.join(tree, 'index.html')], dest: remoteBase + '/site', policy: 'overwrite' });
+      assert.strictEqual((await waitJob(c)).state, 'done');
+    });
+    await test('SFTP : annulation d\'un gros transfert en cours', async () => {
+      const big = path.join(src, 'gros.bin');
+      fs.writeFileSync(big, crypto2.randomBytes(60 * 1024 * 1024));
+      const [id] = jobs.add({ sessionId: 'fq', dir: 'up', items: [big], dest: remoteBase });
+      for (let i = 0; i < 200; i++) { const j = jobs.list().find(x => x.id === id); if (j.state === 'running' && j.bytesDone > 0) break; await sleep(20); }
+      assert.ok(jobs.cancel(id));
+      const j = await waitJob(id);
+      assert.strictEqual(j.state, 'cancelled');
+      assert.ok(j.bytesDone < j.bytesTotal, 'interrompu avant la fin');
+      // la session de navigation reste utilisable
+      assert.ok((await mgr.sftpList('fq', remoteBase)).length >= 1);
+      const [q1, q2] = jobs.add({ sessionId: 'fq', dir: 'up', items: [path.join(tree, 'index.html'), path.join(tree, 'vide.txt')], dest: remoteBase });
+      jobs.cancel(q2);
+      await waitJob(q1);
+      assert.strictEqual(jobs.list().find(x => x.id === q2).state, 'cancelled');
+    });
+    await mgr.sftpDelete('fq', remoteBase, true);
+    mgr.close('fq');
+  }
+
   console.log('Sécurité : commandes dangereuses, audit, enregistrement');
   await test('commandes dangereuses : détectées, sans faux positifs courants', async () => {
     const D = require('../src/renderer/danger.js');

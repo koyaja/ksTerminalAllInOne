@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.9.0** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.10.0** · Windows et **Linux**
 
 ---
 
@@ -190,10 +190,14 @@ Les sessions vivent tant que KSTermus est ouvert. À la fermeture de la fenêtre
 
 ### SFTP
 
-- Navigation par **double-clic**, `↑` (parent), `⌂` (dossier personnel) ou chemin tapé puis `Entrée`.
-- Par fichier : **📝** éditer, **🛡** éditer en sudo, **⤓** télécharger, **✎** renommer, **🗑** supprimer.
-- **⤒ Envoyer** (plusieurs fichiers), **+ Dossier**, **📝 Ouvrir…** (ouvre ou crée un fichier dans le dossier courant).
-- La suppression d'un dossier est **récursive** (une confirmation est demandée).
+- **Double panneau** : bouton **⇆ Panneau PC** → fichiers du PC à gauche, serveur à droite. **Glisser-déposer** dans les deux sens (sur le panneau = dossier courant, sur un dossier = dedans).
+- **Glisser depuis l'Explorateur Windows / Nautilus** directement sur le panneau serveur.
+- **Dossiers complets** (sous-dossiers compris) dans les deux sens ; **⤒ Envoyer ▾** : fichiers ou dossiers ; **⤓ Télécharger** : vers le dossier du panneau PC, sinon le dernier dossier choisi (*Télécharger dans…*).
+- **File de transferts** en bas : progression, nombre de fichiers, vitesse, temps restant, **annulation** (✕), 📂 ouvrir le dossier téléchargé ; 2 transferts en parallèle, la navigation reste utilisable pendant ce temps.
+- **Conflits** : si un élément existe déjà → *Remplacer*, *Ignorer les existants* (fusion de dossiers) ou *Garder les deux* (`nom (1).ext`).
+- **Sélection multiple** (Ctrl / Maj + clic, Ctrl+A), tri par colonne, **filtre**, fichiers cachés (`.*`).
+- **Clavier** : Entrée ouvrir / éditer, Retour arrière dossier parent, Suppr supprimer, F2 renommer, F5 rafraîchir, ↑↓.
+- **Clic droit** : éditer (normal / sudo), terminal dans ce dossier, télécharger, renommer, **droits (chmod)** avec cases rwx ↔ octal, copier le chemin, supprimer. **+ Fichier** crée un fichier vide et l'ouvre dans l'éditeur.
 
 ### Éditeur de fichiers distants (normal et sudo)
 
@@ -419,6 +423,7 @@ src/
 │   ├── remote-editor.js       Lecture / écriture de fichiers distants (SFTP ou sudo), conflits
 │   ├── local-pty.js           Terminaux locaux (ConPTY), détection des shells, sessions détachables
 │   ├── lock.js                Verrouillage d'écran : inactivité, filtrage IPC, anti force brute
+│   ├── sftp-jobs.js           File de transferts SFTP (dossiers, conflits, annulation)
 │   ├── audit.js               Journal d'audit et enregistrements chiffrés (clé de données du coffre)
 │   ├── vpn.js                 VPN WireGuard : lecture .conf, processus kst-wg, SOCKS5 authentifié
 │   ├── updater.js             Mises à jour GitHub Releases : manifeste signé, téléchargement, remplacement
@@ -459,7 +464,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-55 tests couvrent :
+58 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -470,6 +475,7 @@ KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 - **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer ;
 - **le verrouillage** : délai d'inactivité, IPC bloqués sauf déverrouillage, anti force brute, vérification du mot de passe, ouverture par clé ;
+- **la file SFTP** : envoi et téléchargement de dossiers complets (fichier vide compris, contenu identique), conflits (ignorer, renommer, remplacer), annulation d'un gros transfert en cours sans casser la navigation ;
 - **la sécurité** : détection des commandes dangereuses (et absence de faux positifs courants), journal chiffré (rien en clair, filtres, mauvaise clé, purge), enregistrement chiffré (relecture, export asciicast, limite de taille) ;
 - **le VPN WireGuard** : lecture des `.conf`, SSH de bout en bout à travers un vrai tunnel WireGuard vers un serveur joignable seulement dans le VPN, mauvaise clé serveur, destination hors tunnel ;
 - **les mises à jour** (faux serveur GitHub) : détection, téléchargement, SHA-256, signature falsifiée ou d'une autre clé, archive modifiée ou trop grande, pas de retour arrière de version, extraction et remplacement Windows ;
@@ -539,6 +545,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.10.0** | **SFTP** : double panneau PC ↔ serveur avec glisser-déposer, dépôt depuis l'explorateur, dossiers complets, file de transferts (vitesse, temps restant, annulation), gestion des conflits, sélection multiple, tri, filtre, raccourcis clavier, chmod, nouveau fichier ; corrigé : double-clic et rafraîchissement après création / renommage / suppression |
 | **1.9.0** | **Sécurité** : hosts PROD et blocage des commandes dangereuses (confirmation en retapant le nom du host), journal d'audit chiffré (filtres, export CSV, rétention), enregistrement des sessions SSH chiffré avec lecteur intégré et export `.cast` |
 | **1.8.1** | Linux : icône KSTermus fournie dans toutes les tailles standard (16 à 512 px) — elle n'apparaissait pas dans le menu ni le dock ; release automatique GitHub Actions |
 | **1.8.0** | **Thèmes** : 7 thèmes + Automatique (Sombre doux / Clair sépia selon le système), aperçus, appliqués à l'interface, aux terminaux, à l'éditeur et à la barre de titre ; contrastes vérifiés par les tests |

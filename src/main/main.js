@@ -17,6 +17,7 @@ const { Hello } = require('./hello');
 const { Updater } = require('./updater');
 const { VpnManager, parseWgConf, describeConf, defaultBinPath } = require('./vpn');
 const { AuditLog, Recorder, newLogKey } = require('./audit');
+const { SftpJobs } = require('./sftp-jobs');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -132,6 +133,8 @@ function flushUnlockFailures() {
   for (const f of a) audit.log('unlock-failed', { method: f.kind, failedAt: f.at });
   try { fs.unlinkSync(failFile); } catch { /* ignore */ }
 }
+const sftpHosts = new Map(); // sessionId SFTP -> hostId
+function sessionInfoSftp(sessionId) { return sftpHosts.has(sessionId) ? hostMeta(sftpHosts.get(sessionId)) : {}; }
 function hostMeta(hostId) {
   const h = vault.isUnlocked() && vault.data.hosts.find(x => x.id === hostId);
   return h ? { hostId, host: h.label, user: h.username, address: `${h.hostname}:${h.port || 22}` } : { hostId, host: '?' };
@@ -167,9 +170,14 @@ function auditHook(channel, args, result, error) {
       break;
     }
     case 'ssh:close': sessionEnded(args[0], 'onglet fermé'); break;
-    case 'sftp:open': if (!error) A('sftp', { ...hostMeta(args[1]), action: 'ouverture' }); else A('connect-failed', { ...hostMeta(args[1]), kind: 'SFTP', error: String(error.message || error) }); break;
+    case 'sftp:open': if (!error) sftpHosts.set(args[0], args[1]);
+      if (!error) A('sftp', { ...hostMeta(args[1]), action: 'ouverture' }); else A('connect-failed', { ...hostMeta(args[1]), kind: 'SFTP', error: String(error.message || error) }); break;
     case 'sftp:download': if (!error && result) A('sftp', { action: 'téléchargement', remote: args[1], local: result }); break;
     case 'sftp:upload': if (!error) A('sftp', { action: 'envoi', local: args[1], remote: args[2] }); break;
+    case 'sftp:enqueue': if (!error && args[0]) A('sftp', { ...(sessionInfoSftp(args[0].sessionId)), action: args[0].dir === 'up' ? 'envoi' : 'téléchargement', items: (args[0].items || []).join(', ').slice(0, 2000), [args[0].dir === 'up' ? 'remote' : 'local']: args[0].dest }); break;
+    case 'sftp:chmod': if (!error) A('sftp', { action: 'chmod ' + args[2], remote: args[1] }); break;
+    case 'sftp:delete': if (!error) A('sftp', { action: 'suppression', remote: args[1] }); break;
+    case 'sftp:rename': if (!error) A('sftp', { action: 'renommage', remote: args[1] + ' → ' + args[2] }); break;
     case 'editor:write': if (!error) A('file-save', { ...hostMeta(args[1]), path: args[2], sudo: !!(args[4] && args[4].sudo), bytes: Buffer.byteLength(String(args[3] || '')) }); break;
     case 'host:revealPassword': if (!error) A('secret', { ...hostMeta(args[0]), action: 'affichage', what: args[1] === 'sudo' ? 'mot de passe sudo' : 'mot de passe' }); break;
     case 'host:copyPassword': if (!error) A('secret', { ...hostMeta(args[0]), action: 'copie', what: args[1] === 'sudo' ? 'mot de passe sudo' : 'mot de passe' }); break;
@@ -642,7 +650,58 @@ handle('sftp:pickUpload', async () => {
 });
 handle('sftp:upload', (sessionId, localPath, remoteDir, transferId) =>
   manager.sftpTransfer(sessionId, 'upload', path.posix.join(remoteDir, path.basename(localPath)), localPath, transferId));
-handle('sftp:close', (sessionId) => { manager.close(sessionId); return true; });
+handle('sftp:close', (sessionId) => { sftpJobs.cancelSession(sessionId); manager.close(sessionId); return true; });
+
+// ----- Transferts (file d'attente, dossiers, annulation) -----
+const sftpJobs = new SftpJobs({ manager, emit: (c, p) => { if (win && !win.isDestroyed()) win.webContents.send(c, p); } });
+handle('sftp:enqueue', (job) => sftpJobs.add(job || {}));
+handle('sftp:jobs', (sessionId) => sftpJobs.list(sessionId));
+handle('sftp:cancel', (id) => sftpJobs.cancel(id));
+handle('sftp:clearDone', () => { sftpJobs.clearFinished(); return true; });
+// Avant d'envoyer : quels éléments existent déjà à destination ?
+handle('sftp:conflicts', async (sessionId, dir, items, dest) => {
+  const out = [];
+  if (dir === 'up') {
+    const sftp = manager.sftpOf(sessionId);
+    for (const it of items) {
+      const target = path.posix.join(dest, path.basename(it));
+      const ex = await new Promise(r => sftp.stat(target, (e, st) => r(e ? null : st)));
+      if (ex) out.push({ name: path.basename(it), isDir: (ex.mode & 0o170000) === 0o040000 });
+    }
+  } else {
+    for (const it of items) { const target = path.join(dest, path.posix.basename(it)); if (fs.existsSync(target)) out.push({ name: path.posix.basename(it), isDir: fs.statSync(target).isDirectory() }); }
+  }
+  return out;
+});
+handle('sftp:pick', async (kind) => {
+  const props = kind === 'dir' ? ['openDirectory', 'multiSelections'] : kind === 'dest' ? ['openDirectory', 'createDirectory'] : ['openFile', 'multiSelections'];
+  const r = await dialog.showOpenDialog(win, { title: kind === 'dest' ? 'Télécharger dans…' : kind === 'dir' ? 'Envoyer des dossiers' : 'Envoyer des fichiers', defaultPath: kind === 'dest' ? app.getPath('downloads') : undefined, properties: props });
+  return r.canceled ? [] : r.filePaths;
+});
+handle('sftp:chmod', (sessionId, p, mode) => manager.sftpOp(sessionId, 'chmod', p, parseInt(String(mode), 8)));
+handle('sftp:touch', (sessionId, p) => new Promise((resolve, reject) => {
+  const sftp = manager.sftpOf(sessionId);
+  sftp.open(p, 'wx', (e, h) => { if (e) return reject(new Error(e.message === 'Failure' ? 'Ce fichier existe déjà' : e.message)); sftp.close(h, () => resolve(true)); });
+}));
+handle('sftp:downloadsDir', () => app.getPath('downloads'));
+
+// ----- Fichiers du PC (panneau local) -----
+handle('lfs:list', (dir) => {
+  const d = dir || os.homedir();
+  const out = [];
+  for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+    let st = null; try { st = fs.statSync(path.join(d, ent.name)); } catch { /* lien cassé, accès refusé */ }
+    out.push({ name: ent.name, isDir: st ? st.isDirectory() : ent.isDirectory(), size: st ? st.size : 0, mtime: st ? st.mtimeMs : 0, hidden: ent.name.startsWith('.') });
+  }
+  return { dir: path.resolve(d), parent: path.dirname(path.resolve(d)) !== path.resolve(d) ? path.dirname(path.resolve(d)) : null, sep: path.sep, entries: out.sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name)) };
+});
+handle('lfs:roots', () => {
+  if (process.platform !== 'win32') return [{ label: 'Dossier personnel', path: os.homedir() }, { label: '/', path: '/' }];
+  const drives = [];
+  for (const l of 'CDEFGHIJKLMNOPQRSTUVWXYZ') { try { fs.accessSync(l + ':\\'); drives.push({ label: l + ':', path: l + ':\\' }); } catch { /* absent */ } }
+  return [{ label: 'Dossier personnel', path: os.homedir() }, { label: 'Bureau', path: app.getPath('desktop') }, { label: 'Téléchargements', path: app.getPath('downloads') }, ...drives];
+});
+handle('lfs:open', (p) => shell.openPath(p));
 
 handle('clipboard:write', (t) => { clipboard.writeText(String(t)); return true; });
 // Copie d'un secret : effacé du presse-papiers après 30 s s'il n'a pas changé.

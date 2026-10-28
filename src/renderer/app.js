@@ -2743,31 +2743,221 @@
   }
 
   // ---------- SFTP ----------
+  // ---------- Liste de fichiers réutilisable (serveur ou PC) ----------
+  // Sélection multiple (clic, Ctrl, Maj), tri par colonne, filtre, clavier, glisser-déposer.
+  function fileList({ kind, onOpen, onKey, onContext, onDropInto, dragType }) {
+    const st = { entries: [], sel: new Set(), anchor: null, sort: 'name', asc: true, filter: '', hidden: false };
+    const tbody = h('tbody');
+    const head = h('tr');
+    const cols = kind === 'remote' ? [['name', 'Nom'], ['size', 'Taille'], ['mtime', 'Modifié'], ['perms', 'Droits']] : [['name', 'Nom'], ['size', 'Taille'], ['mtime', 'Modifié']];
+    const table = h('table', { class: 'files' }, h('thead', {}, head), tbody);
+    const wrap = h('div', { class: 'sftp-table-wrap', tabindex: '0' }, table);
+    const renderHead = () => head.replaceChildren(...cols.map(([k, l]) => h('th', { class: 'sortable' + (st.sort === k ? ' on' : ''), onclick: () => { st.asc = st.sort === k ? !st.asc : true; st.sort = k; render(); } }, l + (st.sort === k ? (st.asc ? ' ▴' : ' ▾') : ''))));
+    const visible = () => {
+      const f = st.filter.toLowerCase();
+      const list = st.entries.filter(e => e.name !== '.' && e.name !== '..' && (st.hidden || !e.name.startsWith('.')) && (!f || e.name.toLowerCase().includes(f)));
+      const k = st.sort, dir = st.asc ? 1 : -1;
+      return list.sort((a, b) => (b.isDir - a.isDir) || (k === 'name' ? a.name.localeCompare(b.name, 'fr', { numeric: true }) : ((a[k] > b[k]) - (a[k] < b[k]))) * dir);
+    };
+    function render() {
+      renderHead();
+      const list = visible();
+      st.view = list;
+      tbody.replaceChildren(...list.map((e, i) => {
+        const tr = h('tr', { class: 'file-row' + (st.sel.has(e.name) ? ' selected' : '') + (e.isDir ? ' is-dir' : ''), draggable: 'true' },
+          h('td', { class: 'name' }, h('span', { class: 'ficon', text: e.isDir ? '📁' : e.isLink ? '🔗' : fileIcon(e.name) }), e.name),
+          h('td', { class: 'num', text: e.isDir ? '' : fmtSize(e.size) }),
+          h('td', { class: 'num', text: e.mtime ? fmtDate(e.mtime) : '' }),
+          kind === 'remote' ? h('td', { class: 'perm', text: e.perms || '' }) : null);
+        tr.dataset.name = e.name;
+        tr.addEventListener('mousedown', (ev) => {
+          if (ev.button === 2 && st.sel.has(e.name)) return;
+          // Clic simple sur un élément déjà sélectionné : on attend le relâchement
+          // (sinon un glisser de plusieurs éléments perdrait la sélection).
+          if (st.sel.has(e.name) && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) { st.pending = e.name; st.anchor = i; return; }
+          select(e.name, i, ev);
+        });
+        tr.addEventListener('click', (ev) => { if (st.pending === e.name && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) { st.pending = null; st.sel = new Set([e.name]); updateSel(); } });
+        tr.addEventListener('dblclick', () => onOpen(e));
+        tr.addEventListener('contextmenu', (ev) => { ev.preventDefault(); onContext && onContext(ev, selected()); });
+        tr.addEventListener('dragstart', (ev) => {
+          st.pending = null;
+          if (!st.sel.has(e.name)) { st.sel = new Set([e.name]); updateSel(); }
+          ev.dataTransfer.setData(dragType, JSON.stringify(selected().map(x => x.name)));
+          ev.dataTransfer.effectAllowed = 'copy';
+        });
+        if (e.isDir) {
+          tr.addEventListener('dragover', (ev) => { if (acceptsDrop(ev)) { ev.preventDefault(); ev.stopPropagation(); tr.classList.add('drop-into'); } });
+          tr.addEventListener('dragleave', () => tr.classList.remove('drop-into'));
+          tr.addEventListener('drop', (ev) => { tr.classList.remove('drop-into'); if (acceptsDrop(ev)) { ev.preventDefault(); ev.stopPropagation(); onDropInto(ev, e); } });
+        }
+        return tr;
+      }));
+      if (!list.length) tbody.append(h('tr', {}, h('td', { colspan: cols.length, class: 'muted', text: st.entries.length ? 'Aucun élément (filtre / fichiers cachés)' : 'Dossier vide' })));
+    }
+    const acceptsDrop = (ev) => { const ty = [...ev.dataTransfer.types]; return ty.includes('Files') || ty.some(x => x.startsWith('application/x-kst-') && x !== dragType); };
+    function select(name, i, ev) {
+      if (ev.shiftKey && st.anchor !== null) {
+        const [a, b] = [st.anchor, i].sort((x, y) => x - y);
+        if (!ev.ctrlKey && !ev.metaKey) st.sel.clear();
+        st.view.slice(a, b + 1).forEach(x => st.sel.add(x.name));
+      } else if (ev.ctrlKey || ev.metaKey) { st.sel.has(name) ? st.sel.delete(name) : st.sel.add(name); st.anchor = i; }
+      else { st.sel = new Set([name]); st.anchor = i; }
+      updateSel();
+    }
+    // Met à jour la sélection sans reconstruire les lignes (le double-clic reste possible).
+    function updateSel() { for (const tr of tbody.children) if (tr.dataset.name !== undefined) tr.classList.toggle('selected', st.sel.has(tr.dataset.name)); }
+    const selected = () => st.entries.filter(e => st.sel.has(e.name));
+    wrap.addEventListener('keydown', (ev) => {
+      const k = ev.key;
+      if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === 'a') { ev.preventDefault(); st.view.forEach(x => st.sel.add(x.name)); updateSel(); return; }
+      if (k === 'ArrowDown' || k === 'ArrowUp') {
+        ev.preventDefault();
+        const cur = st.anchor === null ? -1 : st.anchor;
+        const n = Math.max(0, Math.min(st.view.length - 1, cur + (k === 'ArrowDown' ? 1 : -1)));
+        if (st.view[n]) select(st.view[n].name, n, ev);
+        const row = tbody.children[n]; if (row) row.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      if (k === 'Enter' && selected().length === 1) { ev.preventDefault(); onOpen(selected()[0]); return; }
+      if (onKey && onKey(ev, selected())) ev.preventDefault();
+    });
+    return {
+      el: wrap, render, selected,
+      set(entries) { const keep = new Set(entries.map(e => e.name)); st.entries = entries; st.sel = new Set([...st.sel].filter(n => keep.has(n))); st.anchor = null; render(); },
+      clearSel() { st.sel.clear(); updateSel(); },
+      setFilter(v) { st.filter = v; render(); },
+      toggleHidden() { st.hidden = !st.hidden; render(); return st.hidden; },
+      focus() { wrap.focus(); }
+    };
+  }
+  function fileIcon(n) {
+    const ext = (n.split('.').pop() || '').toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico'].includes(ext)) return '🖼';
+    if (['zip', 'gz', 'tgz', 'xz', 'bz2', 'rar', '7z', 'tar'].includes(ext)) return '🗜';
+    if (['sh', 'bash', 'py', 'js', 'ts', 'php', 'java', 'go', 'rb', 'c', 'cpp', 'rs'].includes(ext)) return '📜';
+    if (['conf', 'cfg', 'ini', 'yml', 'yaml', 'toml', 'env', 'json', 'xml'].includes(ext)) return '⚙';
+    if (['log', 'txt', 'md'].includes(ext)) return '📃';
+    if (['sql', 'db', 'sqlite'].includes(ext)) return '🗃';
+    return '📄';
+  }
+  // Droits Unix : cases rwx ↔ octal.
+  function chmodDialog(entries) {
+    const first = entries[0];
+    const cur = first && first.mode !== undefined ? (first.mode & 0o777) : 0o644;
+    const boxes = {};
+    const octal = h('input', { value: cur.toString(8).padStart(3, '0'), style: { width: '90px', fontFamily: 'var(--mono)' }, maxlength: 4 });
+    const grid = h('div', { class: 'chmod-grid' }, h('span'), h('b', { text: 'Lecture' }), h('b', { text: 'Écriture' }), h('b', { text: 'Exécution' }),
+      ...[['u', 'Propriétaire', 6], ['g', 'Groupe', 3], ['o', 'Autres', 0]].flatMap(([who, label, shift]) => [h('span', { text: label }),
+        ...[4, 2, 1].map(bit => { const c = h('input', { type: 'checkbox' }); c.checked = !!(cur & (bit << shift)); boxes[who + bit] = [c, bit << shift]; c.addEventListener('change', fromBoxes); return c; })]));
+    function fromBoxes() { let m = 0; for (const [c, v] of Object.values(boxes)) if (c.checked) m |= v; octal.value = m.toString(8).padStart(3, '0'); }
+    octal.addEventListener('input', () => { const m = parseInt(octal.value, 8); if (!isNaN(m)) for (const [c, v] of Object.values(boxes)) c.checked = !!(m & v); });
+    return modal({
+      title: `Droits — ${entries.length > 1 ? entries.length + ' éléments' : first.name}`,
+      body: [grid, h('div', { class: 'form-row', style: { alignItems: 'center', marginTop: '10px' } }, h('span', { class: 'muted small', text: 'Octal :' }), octal, h('span', { class: 'muted small', text: '644 fichier · 755 dossier/script · 600 secret' }))],
+      actions: [{ label: 'Annuler', value: null }, { label: 'Appliquer', class: 'primary', submit: true, onClick: () => /^[0-7]{3,4}$/.test(octal.value) ? octal.value : false }]
+    });
+  }
+  // Conflit à destination : remplacer, ignorer les existants ou garder les deux.
+  async function askConflict(names) {
+    if (!names.length) return 'overwrite';
+    return modal({
+      title: 'Déjà présent à destination',
+      body: [h('p', { text: names.length === 1 ? `« ${names[0].name} » existe déjà.` : `${names.length} éléments existent déjà :` }),
+        names.length > 1 ? h('div', { class: 'conflict-list mono small', text: names.slice(0, 12).map(n => (n.isDir ? '📁 ' : '📄 ') + n.name).join('\n') + (names.length > 12 ? `\n… +${names.length - 12}` : '') }) : null,
+        h('p', { class: 'muted small', text: 'Dossiers : « Ignorer » fusionne en gardant les fichiers déjà présents.' })],
+      actions: [{ label: 'Annuler', value: null }, { label: 'Garder les deux', value: 'rename' }, { label: 'Ignorer les existants', value: 'skip' }, { label: 'Remplacer', class: 'primary', value: 'overwrite' }]
+    });
+  }
+
   function openSftp(hostId) {
     const host = hostById(hostId);
     if (!host) return;
     const id = uid();
     const pathInput = h('input', { class: 'sftp-path', value: '' });
-    const tbody = h('tbody');
-    const transfers = h('div', { class: 'transfers', hidden: true });
-    const tableWrap = h('div', { class: 'sftp-table-wrap' },
-      h('table', { class: 'files' }, h('thead', {}, h('tr', {}, h('th', { text: 'Nom' }), h('th', { text: 'Taille' }), h('th', { text: 'Modifié' }), h('th', { text: 'Droits' }), h('th', {}))), tbody));
-    const body = h('div', { class: 'sftp-body' }, tableWrap, transfers);
+    const filterInput = h('input', { class: 'sftp-filter', placeholder: 'Filtrer…' });
+    const t = { id, kind: 'sftp', hostId, title: host.label, status: 'wait', cwd: '/', home: '/', fit: () => {}, jobs: new Map(), localOpen: false, lcwd: null };
+
+    // --- Panneau serveur ---
+    const remote = fileList({
+      kind: 'remote', dragType: 'application/x-kst-remote',
+      onOpen: (e) => e.isDir ? go(posixJoin(t.cwd, e.name)) : openEditor(hostId, posixJoin(t.cwd, e.name)),
+      onKey: (ev, sel) => {
+        if (ev.key === 'Backspace') { go(posixParent(t.cwd)); return true; }
+        if (ev.key === 'Delete' && sel.length) { removeItems(sel); return true; }
+        if (ev.key === 'F2' && sel.length === 1) { rename(sel[0]); return true; }
+        if (ev.key === 'F5') { go(t.cwd); return true; }
+        return false;
+      },
+      onContext: (ev, sel) => remoteMenu(ev, sel),
+      onDropInto: (ev, e) => dropOnRemote(ev, posixJoin(t.cwd, e.name))
+    });
+    const remotePane = h('div', { class: 'fpane remote-pane' },
+      h('div', { class: 'fpane-head' }, h('span', { class: 'fpane-title', text: '🖧 ' + host.label }),
+        h('button', { class: 'icon-btn', title: 'Dossier parent (Retour arrière)', onclick: () => go(posixParent(t.cwd)) }, '↑'),
+        h('button', { class: 'icon-btn', title: 'Dossier personnel', onclick: () => go(t.home) }, '⌂'),
+        pathInput, h('button', { class: 'icon-btn', title: 'Rafraîchir (F5)', onclick: () => go(t.cwd) }, '⟳')),
+      remote.el,
+      h('div', { class: 'drop-hint', text: 'Dépose ici pour envoyer dans ce dossier' }));
+    // Dépôt sur le panneau serveur : fichiers de l'explorateur ou du panneau PC
+    remotePane.addEventListener('dragover', (ev) => { const ty = [...ev.dataTransfer.types]; if (ty.includes('Files') || ty.includes('application/x-kst-local')) { ev.preventDefault(); remotePane.classList.add('dropping'); } });
+    remotePane.addEventListener('dragleave', (ev) => { if (!remotePane.contains(ev.relatedTarget)) remotePane.classList.remove('dropping'); });
+    remotePane.addEventListener('drop', (ev) => { remotePane.classList.remove('dropping'); ev.preventDefault(); dropOnRemote(ev, t.cwd); });
+
+    // --- Panneau PC (optionnel) ---
+    const lpath = h('input', { class: 'sftp-path' });
+    const local = fileList({
+      kind: 'local', dragType: 'application/x-kst-local',
+      onOpen: (e) => e.isDir ? lgo(joinLocal(t.lcwd, e.name)) : api.invoke('lfs:open', joinLocal(t.lcwd, e.name)),
+      onKey: (ev) => { if (ev.key === 'Backspace') { lgo(t.lparent || t.lcwd); return true; } if (ev.key === 'F5') { lgo(t.lcwd); return true; } return false; },
+      onContext: (ev, sel) => popupMenu({ getBoundingClientRect: () => ({ left: ev.clientX, bottom: ev.clientY, top: ev.clientY }) }, [
+        { label: `⤒ Envoyer vers ${t.cwd}`, onClick: () => upload(sel.map(x => joinLocal(t.lcwd, x.name)), t.cwd) },
+        { label: '📂 Ouvrir', onClick: () => sel.forEach(x => api.invoke('lfs:open', joinLocal(t.lcwd, x.name))) }]),
+      onDropInto: (ev, e) => dropOnLocal(ev, joinLocal(t.lcwd, e.name))
+    });
+    const roots = h('select', { class: 'roots', title: 'Emplacements' });
+    roots.addEventListener('change', () => { if (roots.value) lgo(roots.value); roots.value = ''; });
+    const localPane = h('div', { class: 'fpane local-pane', hidden: true },
+      h('div', { class: 'fpane-head' }, h('span', { class: 'fpane-title', text: '💻 Ce PC' }),
+        h('button', { class: 'icon-btn', title: 'Dossier parent', onclick: () => lgo(t.lparent || t.lcwd) }, '↑'), roots, lpath,
+        h('button', { class: 'icon-btn', title: 'Rafraîchir', onclick: () => lgo(t.lcwd) }, '⟳')),
+      local.el,
+      h('div', { class: 'drop-hint', text: 'Dépose ici pour télécharger dans ce dossier' }));
+    localPane.addEventListener('dragover', (ev) => { if ([...ev.dataTransfer.types].includes('application/x-kst-remote')) { ev.preventDefault(); localPane.classList.add('dropping'); } });
+    localPane.addEventListener('dragleave', (ev) => { if (!localPane.contains(ev.relatedTarget)) localPane.classList.remove('dropping'); });
+    localPane.addEventListener('drop', (ev) => { localPane.classList.remove('dropping'); ev.preventDefault(); dropOnLocal(ev, t.lcwd); });
+    lpath.addEventListener('keydown', (e) => { if (e.key === 'Enter') lgo(lpath.value.trim()); });
+    const joinLocal = (dir, name) => (dir.endsWith(t.lsep || '/') ? dir : dir + (t.lsep || '/')) + name;
+
+    // --- File de transferts ---
+    const qList = h('div', { class: 'q-list' });
+    const qTitle = h('span', { class: 'q-title', text: 'Transferts' });
+    const queue = h('div', { class: 'tqueue', hidden: true },
+      h('div', { class: 'q-head' }, qTitle, h('span', { class: 'spacer' }),
+        h('button', { class: 'btn sm', onclick: async () => { await api.invoke('sftp:clearDone'); for (const [k, j] of t.jobs) if (['done', 'error', 'cancelled'].includes(j.state)) { t.jobs.delete(k); } renderQueue(); } }, 'Effacer les terminés'),
+        h('button', { class: 'icon-btn', title: 'Masquer', onclick: () => { queue.hidden = true; } }, '✕')),
+      qList);
+
+    const localBtn = h('button', { class: 'btn sm', title: 'Afficher le panneau de ce PC (glisser-déposer entre les deux)', onclick: toggleLocal }, '⇆ Panneau PC');
+    const hiddenBtn = h('button', { class: 'icon-btn', title: 'Afficher les fichiers cachés', onclick: () => { const on = remote.toggleHidden(); local.toggleHidden(); hiddenBtn.classList.toggle('on', on); } }, '.*');
     const bar = h('div', { class: 'session-bar' },
       h('span', { class: 'title', text: '📁 ' + host.label }),
-      h('button', { class: 'icon-btn', title: 'Dossier parent', onclick: () => go(posixParent(t.cwd)) }, '↑'),
-      h('button', { class: 'icon-btn', title: 'Dossier personnel', onclick: () => go(t.home) }, '⌂'),
-      pathInput,
-      h('button', { class: 'icon-btn', title: 'Rafraîchir', onclick: () => go(t.cwd) }, '⟳'),
-      h('button', { class: 'btn sm', title: 'Ouvrir ou créer un fichier dans ce dossier', onclick: () => promptOpenFile(hostId, t.cwd) }, '📝 Ouvrir…'),
+      localBtn, filterInput, hiddenBtn,
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn sm', title: 'Créer un fichier vide', onclick: newFile }, '+ Fichier'),
       h('button', { class: 'btn sm', onclick: newFolder }, '+ Dossier'),
-      h('button', { class: 'btn primary sm', onclick: upload }, '⤒ Envoyer'),
+      h('button', { class: 'btn sm', title: 'Télécharger la sélection', onclick: () => download(remote.selected()) }, '⤓ Télécharger'),
+      h('button', { class: 'btn primary sm', onclick: (e) => popupMenu(e.currentTarget, [
+        { label: '📄 Envoyer des fichiers…', onClick: () => pickUpload('files') },
+        { label: '📁 Envoyer des dossiers…', onClick: () => pickUpload('dir') }]) }, '⤒ Envoyer ▾'),
       h('button', { class: 'btn sm', onclick: () => openTerminal(hostId) }, '>_ SSH'));
+    filterInput.addEventListener('input', () => { remote.setFilter(filterInput.value); local.setFilter(filterInput.value); });
+    const panes = h('div', { class: 'fpanes' }, localPane, remotePane);
+    const body = h('div', { class: 'sftp-body' }, panes, queue);
     const el = h('div', { class: 'session' }, bar, h('div', { class: 'term-wrap', style: { padding: 0, background: 'var(--bg)', display: 'flex', flexDirection: 'column' } }, body));
     const wrap = el.querySelector('.term-wrap');
     $('#sessions').append(el);
-
-    const t = { id, kind: 'sftp', hostId, title: host.label, el, status: 'wait', cwd: '/', home: '/', fit: () => {} };
+    t.el = el;
     tabs.set(id, t);
     pathInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(pathInput.value.trim() || '/'); });
 
@@ -2775,70 +2965,145 @@
       const list = await guard(() => api.invoke('sftp:list', id, dir));
       if (!list) { pathInput.value = t.cwd; return; }
       t.cwd = dir; pathInput.value = dir;
-      tbody.replaceChildren(...list.filter(e => e.name !== '.' && e.name !== '..').map(e => {
-        const full = posixJoin(dir, e.name);
-        const tr = h('tr', { class: 'file-row', title: e.isDir ? '' : 'Double-clic : éditer', ondblclick: () => e.isDir ? go(full) : openEditor(hostId, full) },
-          h('td', { class: 'name' }, (e.isDir ? '📁 ' : e.isLink ? '🔗 ' : '📄 '), e.name),
-          h('td', { class: 'num', text: e.isDir ? '' : fmtSize(e.size) }),
-          h('td', { class: 'num', text: fmtDate(e.mtime) }),
-          h('td', { class: 'perm', text: e.perms }),
-          h('td', { class: 'acts' },
-            !e.isDir ? h('button', { class: 'icon-btn', title: 'Éditer', onclick: () => openEditor(hostId, full) }, '📝') : null,
-            !e.isDir ? h('button', { class: 'icon-btn', title: 'Éditer en sudo', onclick: () => openEditor(hostId, full, { sudo: true }) }, '🛡') : null,
-            !e.isDir ? h('button', { class: 'icon-btn', title: 'Télécharger', onclick: () => download(full) }, '⤓') : null,
-            h('button', { class: 'icon-btn', title: 'Renommer', onclick: () => rename(e) }, '✎'),
-            h('button', { class: 'icon-btn', title: 'Supprimer', onclick: () => remove(e) }, '🗑')));
-        tr.addEventListener('click', () => { tbody.querySelectorAll('tr').forEach(x => x.classList.remove('selected')); tr.classList.add('selected'); });
-        return tr;
-      }));
-      if (!tbody.children.length) tbody.append(h('tr', {}, h('td', { colspan: 5, class: 'muted', text: 'Dossier vide' })));
+      remote.set(list);
+    }
+    async function lgo(dir) {
+      const r = await guard(() => api.invoke('lfs:list', dir));
+      if (!r) { lpath.value = t.lcwd || ''; return; }
+      t.lcwd = r.dir; t.lparent = r.parent; t.lsep = r.sep; lpath.value = r.dir;
+      local.set(r.entries);
+    }
+    async function toggleLocal() {
+      t.localOpen = !t.localOpen;
+      localPane.hidden = !t.localOpen;
+      localBtn.classList.toggle('on', t.localOpen);
+      if (t.localOpen && !t.lcwd) {
+        const rs = await guard(() => api.invoke('lfs:roots')) || [];
+        roots.replaceChildren(h('option', { value: '', text: '📍' }), ...rs.map(r => h('option', { value: r.path, text: r.label })));
+        lgo(t.lastLocal || null);
+      }
     }
 
-    function addTransfer(name, dir) {
-      transfers.hidden = false;
-      const i = h('i'); const pct = h('span', { class: 'mono', text: '0 %' });
-      const row = h('div', { class: 'transfer' }, h('span', { text: dir === 'up' ? '⤒' : '⤓' }), h('span', { class: 'name', text: name }), h('div', { class: 'bar' }, i), pct);
-      transfers.prepend(row);
-      const tid = uid();
-      t.transfers = t.transfers || new Map();
-      t.transfers.set(tid, (done, total) => { const p = total ? Math.round(done / total * 100) : 100; i.style.width = p + '%'; pct.textContent = p + ' %'; });
-      return {
-        tid, done: () => { i.style.width = '100%'; pct.textContent = '✓'; setTimeout(() => { row.remove(); if (!transfers.children.length) transfers.hidden = true; }, 4000); },
-        fail: (m) => { row.classList.add('err'); pct.textContent = 'échec'; row.title = m; }
-      };
+    // --- Transferts ---
+    async function enqueue(dir, items, dest) {
+      if (!items.length) return;
+      const conflicts = await guard(() => api.invoke('sftp:conflicts', id, dir, items, dest)) || [];
+      const policy = await askConflict(conflicts);
+      if (!policy) return;
+      const ids = await guard(() => api.invoke('sftp:enqueue', { sessionId: id, dir, items, dest, policy }));
+      if (ids) { queue.hidden = false; }
     }
-    async function download(full) {
-      const tr = addTransfer(full.split('/').pop(), 'down');
-      try { const p = await api.invoke('sftp:download', id, full, tr.tid); if (p) { tr.done(); toast('Téléchargé : ' + p); } else tr.fail('annulé'); }
-      catch (e) { tr.fail(e.message); toast(e.message, true); }
+    const upload = (paths, dest) => enqueue('up', paths, dest);
+    async function download(sel, destOverride) {
+      if (!sel.length) { toast('Sélectionne d\'abord des fichiers ou dossiers', true); return; }
+      let dest = destOverride || (t.localOpen && t.lcwd) || S.settings.downloadDir;
+      if (!dest) dest = await api.invoke('sftp:downloadsDir');
+      enqueue('down', sel.map(x => posixJoin(t.cwd, x.name)), dest);
     }
-    async function upload() {
-      const files = await guard(() => api.invoke('sftp:pickUpload'));
-      if (!files || !files.length) return;
-      const dir = t.cwd;
-      for (const f of files) {
-        const tr = addTransfer(f.split(/[\\/]/).pop(), 'up');
-        try { await api.invoke('sftp:upload', id, f, dir, tr.tid); tr.done(); }
-        catch (e) { tr.fail(e.message); toast(e.message, true); }
+    async function downloadTo(sel) {
+      const r = await guard(() => api.invoke('sftp:pick', 'dest'));
+      if (!r || !r.length) return;
+      const st2 = await guard(() => api.invoke('settings:save', { downloadDir: r[0] })); if (st2) S = st2;
+      download(sel, r[0]);
+    }
+    async function pickUpload(kind) {
+      const files = await guard(() => api.invoke('sftp:pick', kind));
+      if (files && files.length) upload(files, t.cwd);
+    }
+    function dropOnRemote(ev, destDir) {
+      const dt = ev.dataTransfer;
+      const fromLocal = dt.getData('application/x-kst-local');
+      if (fromLocal) { upload(JSON.parse(fromLocal).map(n => joinLocal(t.lcwd, n)), destDir); return; }
+      const paths = [...dt.files].map(f => api.pathForFile(f)).filter(Boolean);
+      if (paths.length) upload(paths, destDir);
+      else if (dt.files.length) toast('Impossible de lire le chemin de ces fichiers', true);
+    }
+    function dropOnLocal(ev, destDir) {
+      const fromRemote = ev.dataTransfer.getData('application/x-kst-remote');
+      if (!fromRemote) return;
+      enqueue('down', JSON.parse(fromRemote).map(n => posixJoin(t.cwd, n)), destDir);
+    }
+    function renderQueue() {
+      const jobs = [...t.jobs.values()].sort((a, b) => (b.startedAt || 9e15) - (a.startedAt || 9e15));
+      const active = jobs.filter(j => ['queued', 'running'].includes(j.state)).length;
+      qTitle.textContent = active ? `Transferts — ${active} en cours` : 'Transferts';
+      qList.replaceChildren(...jobs.map(j => {
+        const pct = j.bytesTotal ? Math.floor(j.bytesDone / j.bytesTotal * 100) : (j.state === 'done' ? 100 : 0);
+        const eta = j.speed && j.bytesTotal ? Math.max(0, Math.round((j.bytesTotal - j.bytesDone) / j.speed)) : null;
+        const info = j.state === 'queued' ? 'en attente' : j.state === 'running'
+          ? `${pct} % · ${fmtSize(j.bytesDone)} / ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesDone}/${j.filesTotal} fichiers` : ''}${j.speed ? ` · ${fmtSize(j.speed)}/s` : ''}${eta !== null ? ` · ${eta < 60 ? eta + ' s' : Math.ceil(eta / 60) + ' min'}` : ''}`
+          : j.state === 'done' ? `✓ ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesTotal} fichiers` : ''}${j.skipped ? ` · ${j.skipped} ignoré(s)` : ''}`
+            : j.state === 'cancelled' ? 'annulé' : 'échec : ' + j.error;
+        return h('div', { class: 'transfer q-' + j.state, title: j.src + ' → ' + j.dest },
+          h('span', { text: j.dir === 'up' ? '⤒' : '⤓' }), h('span', { class: 'name', text: j.name + (j.state === 'running' && j.current && j.current !== j.name ? ' › ' + j.current : '') }),
+          h('div', { class: 'bar' }, h('i', { style: { width: pct + '%' } })), h('span', { class: 'qinfo', text: info }),
+          ['queued', 'running'].includes(j.state) ? h('button', { class: 'icon-btn mini', title: 'Annuler', onclick: () => api.invoke('sftp:cancel', j.id) }, '✕')
+            : j.state === 'done' && j.dir === 'down' ? h('button', { class: 'icon-btn mini', title: 'Ouvrir le dossier', onclick: () => api.invoke('lfs:open', j.dest) }, '📂') : h('span'));
+      }));
+    }
+    t.onJob = (j) => {
+      const prev = t.jobs.get(j.id);
+      t.jobs.set(j.id, j);
+      queue.hidden = false;
+      renderQueue();
+      if (prev && prev.state !== j.state && ['done', 'error'].includes(j.state)) {
+        if (j.state === 'error') toast(`Transfert « ${j.name} » : ${j.error}`, true);
+        if (j.dir === 'up' && j.dest === t.cwd) go(t.cwd);
+        if (j.dir === 'down' && t.localOpen && j.dest === t.lcwd) lgo(t.lcwd);
       }
-      if (t.cwd === dir) go(dir);
+    };
+
+    // --- Actions serveur ---
+    function remoteMenu(ev, sel) {
+      const one = sel.length === 1 ? sel[0] : null;
+      const full = (e) => posixJoin(t.cwd, e.name);
+      popupMenu({ getBoundingClientRect: () => ({ left: ev.clientX, bottom: ev.clientY, top: ev.clientY }) }, [
+        ...(one && !one.isDir ? [{ label: '📝 Éditer', onClick: () => openEditor(hostId, full(one)) }, { label: '🛡 Éditer en sudo', onClick: () => openEditor(hostId, full(one), { sudo: true }) }] : []),
+        ...(one && one.isDir ? [{ label: '📂 Ouvrir', onClick: () => go(full(one)) }, { label: '>_ Terminal ici', onClick: () => openTermHere(full(one)) }] : []),
+        { label: `⤓ Télécharger${sel.length > 1 ? ` (${sel.length})` : ''}`, sub: t.localOpen ? 'vers ' + t.lcwd : 'vers ' + (S.settings.downloadDir || 'Téléchargements'), onClick: () => download(sel) },
+        { label: '⤓ Télécharger dans…', onClick: () => downloadTo(sel) },
+        ...(one ? [{ label: '✎ Renommer (F2)', onClick: () => rename(one) }] : []),
+        { label: '🔐 Droits (chmod)…', onClick: () => chmodItems(sel) },
+        { label: '⧉ Copier le chemin', onClick: () => copyText(sel.map(full).join('\n')) },
+        { label: '🗑 Supprimer (Suppr)', onClick: () => removeItems(sel) }
+      ]);
+    }
+    function openTermHere(dir) { const tt = openTerminal(hostId); toast('Terminal ouvert — cd ' + dir); setTimeout(() => { const p = tt && tt.panes && [...tt.panes.values()][0]; if (p) p.writeInput(`cd '${dir.replace(/'/g, "'\\''")}'\r`); }, 2500); }
+    async function chmodItems(sel) {
+      if (!sel.length) return;
+      const mode = await chmodDialog(sel);
+      if (!mode) return;
+      for (const e of sel) await guard(async () => { await api.invoke('sftp:chmod', id, posixJoin(t.cwd, e.name), mode); return true; });
+      go(t.cwd);
     }
     async function newFolder() {
       const inp = h('input', { placeholder: 'nouveau-dossier' });
       const name = await modal({ title: 'Nouveau dossier', body: field('Nom', inp), actions: [{ label: 'Annuler', value: false }, { label: 'Créer', class: 'primary', submit: true, onClick: () => inp.value.trim() || false }] });
       if (!name) return;
-      if (await guard(() => api.invoke('sftp:mkdir', id, posixJoin(t.cwd, name))) !== undefined) go(t.cwd);
+      if (await guard(async () => { await api.invoke('sftp:mkdir', id, posixJoin(t.cwd, name)); return true; })) go(t.cwd);
+    }
+    async function newFile() {
+      const inp = h('input', { placeholder: 'fichier.conf' });
+      const name = await modal({ title: 'Nouveau fichier', body: [field('Nom', inp), h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: true, id: 'nf-open' }), 'Ouvrir dans l\'éditeur')], actions: [{ label: 'Annuler', value: false }, { label: 'Créer', class: 'primary', submit: true, onClick: () => ({ name: inp.value.trim(), open: document.getElementById('nf-open').checked }) }] });
+      if (!name || !name.name) return;
+      const full = posixJoin(t.cwd, name.name);
+      if (await guard(() => api.invoke('sftp:touch', id, full))) { go(t.cwd); if (name.open) openEditor(hostId, full); }
     }
     async function rename(e) {
       const inp = h('input', { value: e.name });
       const name = await modal({ title: 'Renommer', body: field('Nouveau nom', inp), actions: [{ label: 'Annuler', value: false }, { label: 'Renommer', class: 'primary', submit: true, onClick: () => inp.value.trim() || false }] });
       if (!name || name === e.name) return;
-      if (await guard(() => api.invoke('sftp:rename', id, posixJoin(t.cwd, e.name), posixJoin(t.cwd, name))) !== undefined) go(t.cwd);
+      if (await guard(async () => { await api.invoke('sftp:rename', id, posixJoin(t.cwd, e.name), posixJoin(t.cwd, name)); return true; })) go(t.cwd);
     }
-    async function remove(e) {
-      const msg = e.isDir ? `Supprimer le dossier « ${e.name} » et TOUT son contenu ?` : `Supprimer « ${e.name} » ?`;
+    async function removeItems(sel) {
+      if (!sel.length) return;
+      const dirs = sel.filter(e => e.isDir).length;
+      const msg = sel.length === 1 ? (sel[0].isDir ? `Supprimer le dossier « ${sel[0].name} » et TOUT son contenu ?` : `Supprimer « ${sel[0].name} » ?`)
+        : `Supprimer ${sel.length} éléments${dirs ? ` (dont ${dirs} dossier(s) avec tout leur contenu)` : ''} ?`;
       if (!(await confirmBox('Supprimer', msg))) return;
-      if (await guard(() => api.invoke('sftp:delete', id, posixJoin(t.cwd, e.name), e.isDir)) !== undefined) { toast('Supprimé'); go(t.cwd); }
+      let n = 0;
+      for (const e of sel) if (await guard(async () => { await api.invoke('sftp:delete', id, posixJoin(t.cwd, e.name), e.isDir); return true; })) n++;
+      toast(`${n} élément(s) supprimé(s)`); go(t.cwd);
     }
 
     (async () => {
@@ -2848,7 +3113,8 @@
         const r = await api.invoke('sftp:open', id, hostId);
         if (!tabs.has(id)) { api.invoke('sftp:close', id); return; }
         t.home = r.home; overlay(wrap, null); setStatus(t, 'on');
-        go(r.home);
+        await go(r.home);
+        remote.focus();
       } catch (e) {
         setStatus(t, 'off');
         overlay(wrap, [h('div', { style: { fontWeight: 600 }, text: 'Échec SFTP' }), h('div', { class: 'muted', text: e.message }),
@@ -2856,6 +3122,10 @@
       }
     })();
   }
+  api.on('sftp:job', (j) => { const t = tabs.get(j.sessionId); if (t && t.onJob) t.onJob(j); });
+  // Empêche le navigateur d'ouvrir un fichier lâché à côté d'une zone de dépôt.
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => e.preventDefault());
 
   api.on('sftp:progress', ({ sessionId, transferId, done, total }) => {
     const t = tabs.get(sessionId);
