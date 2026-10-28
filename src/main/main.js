@@ -19,6 +19,7 @@ const { VpnManager, parseWgConf, describeConf, defaultBinPath } = require('./vpn
 const { AuditLog, Recorder, newLogKey } = require('./audit');
 const { SftpJobs } = require('./sftp-jobs');
 const { SyncEngine } = require('./sync');
+const gdrive = require('./gdrive');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -348,12 +349,27 @@ async function runSync() {
 setInterval(() => { if (lock.locked) return; runSync(); }, 5 * 60 * 1000).unref();
 handle('sync:status', () => syncEngine.status());
 handle('sync:enable', async (cfg, password) => {
-  const r = await syncEngine.enable(cfg || {}, password);
+  cfg = cfg || {};
+  if (cfg.method === 'gdrive') {
+    const g = cfg.gdrive || {};
+    cfg.gdrive = pendingGoogle && pendingGoogle.clientId === String(g.clientId || '').trim() ? { ...pendingGoogle } : { clientId: String(g.clientId || '').trim(), clientSecret: String(g.clientSecret || '').trim() };
+  }
+  const r = await syncEngine.enable(cfg, password);
+  pendingGoogle = null;
   audit.log('settings', { action: 'synchronisation activée', method: cfg && cfg.method });
   return { result: r, state: publicState() };
 });
 handle('sync:now', async () => { const r = await syncEngine.syncNow(); return { result: r, state: publicState() }; });
 handle('sync:disable', () => { syncEngine.disable(); audit.log('settings', { action: 'synchronisation désactivée' }); return publicState(); });
+// Connexion Google Drive : navigateur + redirection locale (PKCE). Le jeton reste en mémoire
+// jusqu'à « Activer », puis dans le coffre chiffré.
+let pendingGoogle = null;
+handle('sync:gdriveConnect', async ({ clientId, clientSecret }) => {
+  const r = await gdrive.authorize({ clientId: String(clientId || '').trim(), clientSecret: String(clientSecret || '').trim(), fetch: (u, o) => net.fetch(u, o), openExternal: (u) => shell.openExternal(u) });
+  pendingGoogle = { clientId: String(clientId).trim(), clientSecret: String(clientSecret || '').trim(), refreshToken: r.refreshToken, email: r.email };
+  if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.focus(); }
+  return { email: r.email };
+});
 handle('sync:pickFolder', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Dossier de synchronisation (Google Drive, OneDrive, Dropbox, Syncthing, partage réseau…)', properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];

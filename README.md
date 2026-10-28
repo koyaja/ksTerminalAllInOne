@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.11.0** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.12.0** · Windows et **Linux**
 
 ---
 
@@ -65,7 +65,7 @@
 | **Keychain** | Import OpenSSH / PEM / PuTTY `.ppk`, génération ed25519 / RSA 4096, export, copie de la clé publique |
 | **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
-| **Synchronisation** | Coffre **chiffré** partagé entre tes PC (Windows ↔ Linux) via un dossier cloud ou un dépôt GitHub privé ; fusion automatique, conflits résolus |
+| **Synchronisation** | Coffre **chiffré** partagé entre tes PC (Windows ↔ Linux) via **Google Drive en connexion directe**, un dossier cloud ou un dépôt GitHub privé ; fusion automatique, conflits résolus |
 | **Production** | Hosts marqués **PROD** (badge et cadre rouges) ; commande dangereuse (`rm -rf /`, `DROP`, `mkfs`, `reboot`, `git push --force`…) bloquée jusqu'à ce qu'on retape le nom du host |
 | **Audit** | Journal **chiffré** : connexions, commandes, fichiers modifiés, transferts, VPN, secrets consultés, déverrouillages ; filtres, export CSV, rétention |
 | **Enregistrements** | Sessions SSH enregistrées (asciicast chiffré) et **relues dans l'app** (pause, vitesse x1-x8, barre de temps), export `.cast` |
@@ -279,8 +279,11 @@ Fonctionnement : chaque VPN démarré lance `kst-wg` (wireguard-go officiel + pi
 
 | Méthode | À renseigner |
 |---|---|
+| 🟢 **Google Drive** (connexion directe) | Bouton *Se connecter à Google* : rien à installer (utile sous Linux, sans client Drive officiel). Fichier rangé dans l'**espace caché** de l'application (portée `drive.appdata`) : invisible dans ton Drive, et KSTermus ne voit aucun de tes fichiers |
 | 📁 **Dossier cloud** | Un dossier déjà synchronisé (Google Drive, OneDrive, Dropbox, Syncthing, partage réseau) — le même sur chaque PC |
 | 🐙 **GitHub privé** | `propriétaire/dépôt` (privé, sinon refusé) + un jeton *fine-grained* limité à ce dépôt, permission *Contents : Read and write* |
+
+**Identifiant client Google (une fois, 5 min)** — Google impose qu'une application de bureau ait son identifiant OAuth : [console.cloud.google.com](https://console.cloud.google.com) ▸ nouveau projet *KSTermus* ▸ *API et services ▸ Bibliothèque* ▸ activer **Google Drive API** ▸ *Écran de consentement OAuth* (Externe, nom *KSTermus*, portée `…/auth/drive.appdata`) ▸ **Publier l'application** (sinon l'accès expire après 7 jours ; aucune validation Google n'est requise pour cette portée) ▸ *Identifiants ▸ ID client OAuth ▸ Application de bureau* ▸ copier l'ID et le code secret dans KSTermus. Le même identifiant sur tous les PC. La connexion passe par le navigateur (OAuth + PKCE, redirection locale `127.0.0.1`) : KSTermus ne voit jamais le mot de passe Google ; le jeton est chiffré dans le coffre.
 
 1. **Premier PC** : choisir la méthode et un **mot de passe de synchronisation** (le mot de passe maître convient). KSTermus crée `kstermus-sync.kst`.
 2. **Autres PC** : même méthode, **même mot de passe de synchronisation** (le mot de passe maître de chaque PC peut être différent). Les deux contenus sont fusionnés.
@@ -443,6 +446,7 @@ src/
 │   ├── remote-editor.js       Lecture / écriture de fichiers distants (SFTP ou sudo), conflits
 │   ├── local-pty.js           Terminaux locaux (ConPTY), détection des shells, sessions détachables
 │   ├── lock.js                Verrouillage d'écran : inactivité, filtrage IPC, anti force brute
+│   ├── gdrive.js              Google Drive direct : OAuth PKCE local, espace caché appDataFolder
 │   ├── sync.js                Synchronisation chiffrée (dossier / GitHub), fusion à trois voies
 │   ├── sftp-jobs.js           File de transferts SFTP (dossiers, conflits, annulation)
 │   ├── audit.js               Journal d'audit et enregistrements chiffrés (clé de données du coffre)
@@ -485,7 +489,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-60 tests couvrent :
+61 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -496,7 +500,7 @@ KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 - **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer ;
 - **le verrouillage** : délai d'inactivité, IPC bloqués sauf déverrouillage, anti force brute, vérification du mot de passe, ouverture par clé ;
-- **la synchronisation** : deux PC aux mots de passe maîtres différents (union, modifications croisées, suppression propagée, conflit → le plus récent, suppression contre modification, aucune écriture inutile, rien en clair), GitHub simulé (jeton refusé, dépôt public refusé, écriture concurrente rejouée, jeton jamais exposé) ;
+- **la synchronisation** : deux PC aux mots de passe maîtres différents (union, modifications croisées, suppression propagée, conflit → le plus récent, suppression contre modification, aucune écriture inutile, rien en clair), Google Drive simulé (OAuth PKCE vérifié, refus de l'utilisateur, espace caché, chiffré, deux PC, accès révoqué), GitHub simulé (jeton refusé, dépôt public refusé, écriture concurrente rejouée, jeton jamais exposé) ;
 - **la file SFTP** : envoi et téléchargement de dossiers complets (fichier vide compris, contenu identique), conflits (ignorer, renommer, remplacer), annulation d'un gros transfert en cours sans casser la navigation ;
 - **la sécurité** : détection des commandes dangereuses (et absence de faux positifs courants), journal chiffré (rien en clair, filtres, mauvaise clé, purge), enregistrement chiffré (relecture, export asciicast, limite de taille) ;
 - **le VPN WireGuard** : lecture des `.conf`, SSH de bout en bout à travers un vrai tunnel WireGuard vers un serveur joignable seulement dans le VPN, mauvaise clé serveur, destination hors tunnel ;
@@ -567,6 +571,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.12.0** | **Google Drive en connexion directe** pour la synchronisation (sans client Drive installé, idéal sous Linux) : OAuth + PKCE dans le navigateur, espace caché de l'application, jeton chiffré dans le coffre |
 | **1.11.0** | **Synchronisation chiffrée entre PC** (dossier cloud ou GitHub privé) : fusion à trois voies, résolution des conflits, automatique (modification, déverrouillage, 5 min), indicateur et liste des PC |
 | **1.10.0** | **SFTP** : double panneau PC ↔ serveur avec glisser-déposer, dépôt depuis l'explorateur, dossiers complets, file de transferts (vitesse, temps restant, annulation), gestion des conflits, sélection multiple, tri, filtre, raccourcis clavier, chmod, nouveau fichier ; corrigé : double-clic et rafraîchissement après création / renommage / suppression |
 | **1.9.0** | **Sécurité** : hosts PROD et blocage des commandes dangereuses (confirmation en retapant le nom du host), journal d'audit chiffré (filtres, export CSV, rétention), enregistrement des sessions SSH chiffré avec lecteur intégré et export `.cast` |

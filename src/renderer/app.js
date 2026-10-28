@@ -1183,7 +1183,7 @@
   function syncInfo(st) {
     if (!st || !st.enabled) return [h('div', { class: 'muted small', text: 'Désactivée. Hosts, clés, snippets, tunnels, VPN et réglages restent sur ce PC.' })];
     return [
-      h('div', { class: 'small', text: `${st.method === 'github' ? '🐙 GitHub' : '📁 Dossier'} : ${st.where}` }),
+      h('div', { class: 'small', text: `${st.method === 'github' ? '🐙 GitHub' : st.method === 'gdrive' ? '🟢' : '📁 Dossier'} : ${st.where}` }),
       h('div', { class: 'small' + (st.lastError ? ' err-text' : ''), text: st.lastError ? '⚠ ' + st.lastError : `Dernière synchro : ${ago(st.lastSync)}` + (st.lastStats && st.lastStats.conflicts ? ` · ${st.lastStats.conflicts} conflit(s) résolu(s)` : '') }),
       st.devices && st.devices.length ? h('div', { class: 'muted small', text: 'PC : ' + st.devices.map(d => `${d.name}${d.id === st.deviceId ? ' (ce PC)' : ''} — ${ago(d.lastSync)}`).join(' · ') }) : null
     ];
@@ -1192,7 +1192,7 @@
     const st = S.sync || {};
     return h('div', { class: 'row', style: { alignItems: 'flex-start' } },
       h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Synchronisation entre PC' }),
-        h('div', { class: 'muted small', text: 'Coffre chiffré partagé entre tes PC (Windows ↔ Linux) via un dossier cloud ou un dépôt GitHub privé. Fusion automatique, à chaque modification et toutes les 5 min.' }),
+        h('div', { class: 'muted small', text: 'Coffre chiffré partagé entre tes PC (Windows ↔ Linux) via Google Drive (connexion directe), un dossier cloud ou un dépôt GitHub privé. Fusion automatique, à chaque modification et toutes les 5 min.' }),
         h('div', { id: 'sync-info', class: 'sync-info' }, syncInfo(st))),
       h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' } },
         st.enabled ? h('button', { class: 'btn sm', onclick: async () => { const r = await guard(() => api.invoke('sync:now')); if (r) { setState(r.state); syncToast(r.result); } } }, '⟳ Synchroniser') : null,
@@ -1204,7 +1204,7 @@
   }
   async function configureSync() {
     const st = S.sync || {};
-    let method = st.method || 'folder';
+    let method = st.method || 'gdrive';
     const folder = h('input', { value: st.folder || '', placeholder: 'ex. C:\\Users\\moi\\OneDrive\\KSTermus  ou  ~/Dropbox/KSTermus' });
     const browse = h('button', { class: 'btn sm', type: 'button', onclick: async () => { const f = await guard(() => api.invoke('sync:pickFolder')); if (f) folder.value = f; } }, 'Parcourir…');
     const g = st.github || {};
@@ -1216,19 +1216,53 @@
     const ghBox = h('div', {},
       h('div', { class: 'form-row' }, field('Dépôt privé (propriétaire/nom)', repo), h('div', { class: 'narrow' }, field('Branche', branch))),
       field('Jeton GitHub', secretInput(token, { copy: false }), 'GitHub ▸ Settings ▸ Developer settings ▸ Fine-grained tokens : accès à CE dépôt seulement, permission « Contents : Read and write ». Le jeton reste chiffré dans le coffre.'));
+    // Google Drive (connexion directe, sans client Drive installé)
+    const gd = st.gdrive || {};
+    const gClient = h('input', { value: gd.clientId || S.settings.googleClientId || '', placeholder: '123456789-abc….apps.googleusercontent.com', spellcheck: 'false' });
+    const gSecret = h('input', { type: 'password', placeholder: 'GOCSPX-… (fourni avec l\'identifiant)', autocomplete: 'off' });
+    const gState = h('div', { class: 'small', text: gd.connected ? `✓ Connecté : ${gd.email || 'compte Google'}` : 'Pas encore connecté.' });
+    let gConnected = !!gd.connected;
+    const gBtn = h('button', { class: 'btn sm primary', type: 'button', onclick: async () => {
+      if (!gClient.value.trim()) { toast('Renseigne l\'identifiant client Google', true); return; }
+      gBtn.disabled = true; gState.textContent = 'Valide dans le navigateur qui vient de s\'ouvrir…';
+      try {
+        const r = await api.invoke('sync:gdriveConnect', { clientId: gClient.value.trim(), clientSecret: gSecret.value.trim() });
+        gConnected = true; gState.textContent = `✓ Connecté : ${r.email || 'compte Google'}`;
+        const s3 = await guard(() => api.invoke('settings:save', { googleClientId: gClient.value.trim() })); if (s3) S = s3;
+      } catch (ex) { gState.textContent = '⚠ ' + ex.message; }
+      finally { gBtn.disabled = false; }
+    } }, gd.connected ? 'Reconnecter' : 'Se connecter à Google');
+    const gGuide = h('details', { class: 'guide small' }, h('summary', { text: 'Créer l\'identifiant client Google (une seule fois, 5 min)' }),
+      h('ol', {}, ...[
+        'console.cloud.google.com ▸ créer un projet « KSTermus ».',
+        'API et services ▸ Bibliothèque ▸ « Google Drive API » ▸ Activer.',
+        'Écran de consentement OAuth ▸ Externe ▸ nom « KSTermus », ton e-mail ▸ Portées : ajouter « …/auth/drive.appdata » ▸ puis « Publier l\'application » (En production : sinon l\'accès expire au bout de 7 jours ; aucune validation Google nécessaire pour cette portée).',
+        'Identifiants ▸ Créer ▸ ID client OAuth ▸ type « Application de bureau » ▸ copier l\'ID client et le code secret ici.',
+        'Utilise le même identifiant sur tous tes PC (l\'espace caché de Drive est lié à cet identifiant).'
+      ].map(x => h('li', { text: x }))));
+    const gBox = h('div', {},
+      field('Identifiant client Google (OAuth « Application de bureau »)', gClient),
+      field('Code secret du client', secretInput(gSecret, { copy: false }), 'Pour une application de bureau, Google le fournit avec l\'identifiant ; il n\'est pas confidentiel au sens strict mais reste chiffré dans le coffre.'),
+      h('div', { class: 'form-row', style: { alignItems: 'center', gap: '10px' } }, gBtn, gState),
+      h('p', { class: 'muted small', text: 'KSTermus n\'a accès qu\'à son espace caché dans ton Drive (portée drive.appdata) : il ne voit aucun de tes fichiers, et le fichier n\'apparaît pas dans ton Drive. Contenu chiffré avant l\'envoi.' }),
+      gGuide);
     const seg = h('div', { class: 'seg' },
+      h('button', { type: 'button', class: method === 'gdrive' ? 'on' : '', onclick: (e) => setM('gdrive', e) }, '🟢 Google Drive'),
       h('button', { type: 'button', class: method === 'folder' ? 'on' : '', onclick: (e) => setM('folder', e) }, '📁 Dossier cloud'),
       h('button', { type: 'button', class: method === 'github' ? 'on' : '', onclick: (e) => setM('github', e) }, '🐙 GitHub privé'));
-    function setM(m, e) { method = m; seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget)); folderBox.hidden = m !== 'folder'; ghBox.hidden = m !== 'github'; }
-    folderBox.hidden = method !== 'folder'; ghBox.hidden = method !== 'github';
+    function setM(m, e) { method = m; seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.currentTarget)); folderBox.hidden = m !== 'folder'; ghBox.hidden = m !== 'github'; gBox.hidden = m !== 'gdrive'; }
+    folderBox.hidden = method !== 'folder'; ghBox.hidden = method !== 'github'; gBox.hidden = method !== 'gdrive';
     const r = await modal({
       title: 'Synchronisation entre PC', wide: true,
-      body: [seg, h('div', { style: { height: '10px' } }), folderBox, ghBox,
+      body: [seg, h('div', { style: { height: '10px' } }), gBox, folderBox, ghBox,
         field('Mot de passe de synchronisation', secretInput(pw, { copy: false }), st.enabled ? 'Le même que sur les autres PC (celui choisi lors de la première activation).' : 'Premier PC : choisis-le (ton mot de passe maître convient). Autres PC : le même. Il chiffre le fichier partagé.'),
         h('p', { class: 'muted small', text: 'Synchronisés : hosts, clés, snippets, tunnels, VPN, known hosts, espaces de travail, thème et réglages de sécurité. Restent sur ce PC : historique des éditions, journal d\'audit, enregistrements, shell par défaut, dossier de téléchargement.' })],
       actions: [{ label: 'Annuler', value: null }, { label: st.enabled ? 'Enregistrer et synchroniser' : 'Activer', class: 'primary', submit: true, onClick: async () => {
         const [owner, name] = repo.value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').split('/');
-        const cfg = method === 'folder' ? { method, folder: folder.value.trim() } : { method, github: { owner, repo: name, branch: branch.value.trim() || 'main', token: token.value.trim() } };
+        if (method === 'gdrive' && !gConnected) { toast('Clique d\'abord « Se connecter à Google »', true); return false; }
+        const cfg = method === 'folder' ? { method, folder: folder.value.trim() }
+          : method === 'gdrive' ? { method, gdrive: { clientId: gClient.value.trim(), clientSecret: gSecret.value.trim() } }
+            : { method, github: { owner, repo: name, branch: branch.value.trim() || 'main', token: token.value.trim() } };
         if (method === 'folder' && !cfg.folder) { toast('Choisis un dossier', true); return false; }
         if (method === 'github' && (!owner || !name)) { toast('Dépôt au format propriétaire/nom', true); return false; }
         try { return await api.invoke('sync:enable', cfg, pw.value); } catch (ex) { toast(ex.message, true); return false; }

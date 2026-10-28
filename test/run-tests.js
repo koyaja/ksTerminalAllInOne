@@ -742,6 +742,79 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       assert.deepStrictEqual(A.eng.status().devices.map(d => d.name).sort(), ['VIVOBOOK', 'koyaja-linux']);
       assert.ok(!JSON.stringify(A.eng.status()).includes(A.v.data.sync.key), 'la clé ne sort pas du coffre');
     });
+    await test('sync (Google Drive direct) : OAuth PKCE local, espace caché appDataFolder, deux PC', async () => {
+      const gauth = require('../src/main/gdrive');
+      const G = { codes: new Map(), tokens: new Map(), files: new Map(), seq: 0, revoked: false };
+      const srv = http.createServer((req, res) => {
+        let body = ''; req.on('data', c => body += c); req.on('end', () => {
+          const u = new URL(req.url, 'http://x');
+          const json = (o, st = 200) => { res.statusCode = st; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(o)); };
+          if (u.pathname === '/token') {
+            const p = new URLSearchParams(body);
+            if (p.get('grant_type') === 'authorization_code') {
+              const c = G.codes.get(p.get('code'));
+              if (!c) return json({ error: 'invalid_grant' }, 400);
+              const ok = crypto2.createHash('sha256').update(p.get('code_verifier')).digest('base64url') === c.challenge;
+              if (!ok || p.get('redirect_uri') !== c.redirect || p.get('client_id') !== 'cid-kst') return json({ error: 'invalid_request' }, 400);
+              const idt = 'x.' + Buffer.from(JSON.stringify({ email: 'koyaja@gmail.com' })).toString('base64url') + '.y';
+              return json({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600, id_token: idt });
+            }
+            if (p.get('grant_type') === 'refresh_token') return G.revoked ? json({ error: 'invalid_grant' }, 400) : json({ access_token: 'at-' + (++G.seq), expires_in: 3600 });
+          }
+          if (!/^Bearer at-/.test(req.headers.authorization || '')) return json({}, 401);
+          if (u.pathname === '/drive/files' && req.method === 'GET') {
+            assert.strictEqual(u.searchParams.get('spaces'), 'appDataFolder');
+            return json({ files: [...G.files.values()].map(f => ({ id: f.id, version: String(f.version) })) });
+          }
+          const m = u.pathname.match(/^\/drive\/files\/(\w+)$/);
+          if (m && u.searchParams.get('alt') === 'media') { res.end(G.files.get(m[1]).content); return; }
+          if (u.pathname === '/upload/files' && req.method === 'POST') {
+            assert.ok(body.includes('"parents":["appDataFolder"]'), 'créé dans l\'espace caché');
+            const content = body.split('\r\n\r\n')[2].split('\r\n--')[0];
+            const id = 'f' + (++G.seq); G.files.set(id, { id, version: 1, content }); return json({ id });
+          }
+          const mu = u.pathname.match(/^\/upload\/files\/(\w+)$/);
+          if (mu && req.method === 'PATCH') { const f = G.files.get(mu[1]); f.content = body; f.version++; return json({ id: f.id }); }
+          json({}, 404);
+        });
+      });
+      await new Promise(r => srv.listen(0, '127.0.0.1', r));
+      const base = `http://127.0.0.1:${srv.address().port}`;
+      const endpoints = { authUrl: base + '/auth', tokenUrl: base + '/token', apiBase: base + '/drive', uploadBase: base + '/upload' };
+      // « navigateur » simulé : Google renvoie un code vers la redirection locale
+      const browser = async (url) => {
+        const q = new URL(url).searchParams;
+        assert.strictEqual(q.get('scope'), gauth.SCOPES.join(' '));
+        assert.strictEqual(q.get('code_challenge_method'), 'S256');
+        const code = 'code-' + Math.random(); G.codes.set(code, { challenge: q.get('code_challenge'), redirect: q.get('redirect_uri') });
+        setTimeout(() => fetch(`${q.get('redirect_uri')}?code=${code}&state=${q.get('state')}`), 10);
+      };
+      try {
+        const tok = await gauth.authorize({ clientId: 'cid-kst', clientSecret: 'sec', fetch: (u, o) => fetch(u, o), openExternal: browser, endpoints });
+        assert.strictEqual(tok.email, 'koyaja@gmail.com'); assert.strictEqual(tok.refreshToken, 'rt-1');
+        // refus côté Google
+        const deny = async (url) => { const q = new URL(url).searchParams; setTimeout(() => fetch(`${q.get('redirect_uri')}?error=access_denied&state=${q.get('state')}`), 10); };
+        await assert.rejects(gauth.authorize({ clientId: 'cid-kst', fetch: (u, o) => fetch(u, o), openExternal: deny, endpoints }), /refusée/);
+        const mk = (n) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-gd-')); const v = new Vault(d); v.create('Maitre-' + n + '-123'); return { v, eng: new SyncEngine({ vault: v, fetch: (u, o) => fetch(u, o), deviceName: n, platform: 'test', gdriveEndpoints: endpoints }) }; };
+        const A = mk('A'), B = mk('B');
+        A.v.data.hosts.push({ id: 'd1', label: 'Via Drive', hostname: '5.5.5.5', password: 'pw-drive', updatedAt: T(1) }); A.v.save();
+        await assert.rejects(A.eng.enable({ method: 'gdrive', gdrive: { clientId: 'cid-kst' } }, 'Sync-Pass-2026'), /Connecte-toi/);
+        const g = { clientId: 'cid-kst', clientSecret: 'sec', refreshToken: tok.refreshToken, email: tok.email };
+        await A.eng.enable({ method: 'gdrive', gdrive: g }, 'Sync-Pass-2026');
+        const stored = [...G.files.values()][0];
+        assert.ok(stored && !stored.content.includes('pw-drive') && !stored.content.includes('Via Drive'), 'chiffré dans Drive');
+        await B.eng.enable({ method: 'gdrive', gdrive: g }, 'Sync-Pass-2026');
+        assert.strictEqual(B.v.data.hosts[0].label, 'Via Drive');
+        assert.ok(B.eng.status().where.includes('koyaja@gmail.com'));
+        assert.ok(!JSON.stringify(B.eng.status()).includes('rt-1'), 'jeton de rafraîchissement jamais exposé');
+        B.v.data.snippets.push({ id: 'sd', name: 'up', command: 'uptime', updatedAt: T(5) }); B.v.save();
+        await B.eng.syncNow(); await A.eng.syncNow();
+        assert.strictEqual(A.v.data.snippets[0].command, 'uptime');
+        assert.strictEqual(G.files.size, 1, 'un seul fichier, mis à jour');
+        G.revoked = true; A.eng.gdriveCache.expiresAt = 0;
+        await assert.rejects(A.eng.syncNow(), /révoqué/);
+      } finally { srv.close(); }
+    });
     await test('sync (GitHub privé) : création, lecture, écriture concurrente rejouée, dépôt public refusé', async () => {
       const store = { sha: null, content: null, writes: 0, private: true, conflictOnce: false };
       const gh = http.createServer((req, res) => {

@@ -15,6 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { GdriveBackend } = require('./gdrive');
 
 const KDF = { N: 2 ** 17, r: 8, p: 1, keyLen: 32 };
 const MAXMEM = 512 * 1024 * 1024;
@@ -158,8 +159,9 @@ class GithubBackend {
 
 // ----- Moteur -----
 class SyncEngine {
-  constructor({ vault, fetch, deviceName, platform, emit = () => {}, now = () => new Date() }) {
-    Object.assign(this, { vault, fetch, deviceName, platform, emit, now });
+  constructor({ vault, fetch, deviceName, platform, emit = () => {}, now = () => new Date(), gdriveEndpoints }) {
+    Object.assign(this, { vault, fetch, deviceName, platform, emit, now, gdriveEndpoints });
+    this.gdriveCache = {};
     this.running = null;
   }
   cfg() { return (this.vault.data && this.vault.data.sync) || null; }
@@ -167,6 +169,7 @@ class SyncEngine {
   backendFor(c) {
     if (c.method === 'folder') return new FolderBackend({ folder: c.folder });
     if (c.method === 'github') return new GithubBackend({ ...c.github, fetch: this.fetch });
+    if (c.method === 'gdrive') return new GdriveBackend({ ...c.gdrive, fetch: this.fetch, endpoints: this.gdriveEndpoints, tokenCache: this.gdriveCache });
     throw new Error('Méthode de synchronisation inconnue');
   }
 
@@ -178,14 +181,17 @@ class SyncEngine {
     return { enabled: true, method: c.method, where, lastSync: c.lastSync || null, lastError: c.lastError || null, lastStats: c.lastStats || null,
       devices: c.devices || [], running: !!this.running, deviceId: c.deviceId,
       github: c.method === 'github' ? { owner: c.github.owner, repo: c.github.repo, branch: c.github.branch, path: c.github.path, hasToken: !!c.github.token } : undefined,
-      folder: c.method === 'folder' ? c.folder : undefined };
+      folder: c.method === 'folder' ? c.folder : undefined,
+      gdrive: c.method === 'gdrive' ? { email: c.gdrive.email, clientId: c.gdrive.clientId, connected: !!c.gdrive.refreshToken } : undefined };
   }
 
   // Active la synchronisation : crée le fichier distant ou rejoint celui qui existe.
-  async enable({ method, folder, github }, password) {
+  async enable({ method, folder, github, gdrive }, password) {
     if (!password || String(password).length < 8) throw new Error('Mot de passe de synchronisation : 8 caractères minimum');
     const prev = this.cfg();
-    const c = { method, folder, github: github ? { branch: 'main', path: FILE_NAME, ...github } : undefined, deviceId: (prev && prev.deviceId) || crypto.randomUUID() };
+    const c = { method, folder, github: github ? { branch: 'main', path: FILE_NAME, ...github } : undefined, gdrive: gdrive ? { ...gdrive } : undefined, deviceId: (prev && prev.deviceId) || crypto.randomUUID() };
+    if (method === 'gdrive' && prev && prev.gdrive && !c.gdrive.refreshToken && prev.gdrive.clientId === c.gdrive.clientId) Object.assign(c.gdrive, { refreshToken: prev.gdrive.refreshToken, email: prev.gdrive.email, clientSecret: c.gdrive.clientSecret || prev.gdrive.clientSecret });
+    if (method === 'gdrive' && !(c.gdrive && c.gdrive.refreshToken)) throw new Error('Connecte-toi d\'abord à Google (bouton « Se connecter à Google »)');
     if (method === 'github' && prev && prev.github && !c.github.token) c.github.token = prev.github.token; // jeton déjà enregistré
     const be = this.backendFor(c);
     await be.check();
