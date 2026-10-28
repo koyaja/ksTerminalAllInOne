@@ -71,7 +71,8 @@ jobs:
   build-macos:
     needs: prepare
     if: needs.prepare.outputs.exists == 'false'
-    runs-on: macos-14
+    runs-on: macos-latest
+    timeout-minutes: 45
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
@@ -106,6 +107,9 @@ jobs:
 
   publish:
     needs: [prepare, build-linux-windows, build-macos]
+    # Si le Mac n'est pas disponible, on publie quand même Windows / Linux ;
+    # le job « add-macos » ajoutera les fichiers Mac à la release plus tard.
+    if: always() && needs.prepare.outputs.exists == 'false' && needs.build-linux-windows.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +143,7 @@ jobs:
           fi
           rm -f dist/release/notes.md
           cp artifacts/linux-windows/*.deb artifacts/linux-windows/*.AppImage artifacts/linux-windows/*.tar.gz dist/release/
-          cp artifacts/macos/* dist/release/
+          if [ -d artifacts/macos ]; then cp artifacts/macos/* dist/release/; else echo "::warning::Pas de build macOS dans cette exécution"; fi
           (cd dist/release && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
       - name: Publier
         env:
@@ -171,3 +175,47 @@ jobs:
           cmp "$RUNNER_TEMP/rel/KSTermus-win-x64-$V.zip" "dist/release/KSTermus-win-x64-$V.zip"
           gh release upload "v$V" dist/release/update.json
           echo "update.json ajouté à v$V"
+
+  # Release déjà publiée sans les fichiers macOS (Mac indisponible au moment du build) :
+  # construit sur un Mac et ajoute .dmg / .zip + met à jour SHA256SUMS.
+  add-macos:
+    needs: [prepare, publish]
+    if: always() && needs.prepare.outputs.exists == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Déjà présents ?
+        id: chk
+        run: |
+          V=${{ needs.prepare.outputs.version }}
+          if gh release view "v$V" --json assets -q '.assets[].name' | grep -q -- '-mac-'; then echo "skip=true" >> "$GITHUB_OUTPUT"; else echo "skip=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-node@v4
+        if: steps.chk.outputs.skip == 'false'
+        with: { node-version: 22, cache: npm }
+      - name: Build macOS
+        if: steps.chk.outputs.skip == 'false'
+        run: |
+          npm ci
+          for a in arm64 x64; do
+            if [ ! -d node_modules/@lydell/node-pty-darwin-$a ]; then
+              npm pack @lydell/node-pty-darwin-$a@1.2.0-beta.15
+              mkdir -p node_modules/@lydell/node-pty-darwin-$a
+              tar xzf lydell-node-pty-darwin-$a-*.tgz -C node_modules/@lydell/node-pty-darwin-$a --strip-components=1
+            fi
+          done
+          npm run dist:mac
+          for app in dist/mac*/KSTermus.app; do codesign --verify --deep --strict "$app" && echo "OK $app"; done
+      - name: Ajouter à la release
+        if: steps.chk.outputs.skip == 'false'
+        run: |
+          V=${{ needs.prepare.outputs.version }}
+          mkdir -p rel && cd rel
+          gh release download "v$V" -p SHA256SUMS.txt
+          cp ../dist/*.dmg ../dist/KSTermus-*-mac-*.zip .
+          shasum -a 256 *.dmg KSTermus-*-mac-*.zip >> SHA256SUMS.txt
+          gh release upload "v$V" *.dmg KSTermus-*-mac-*.zip
+          gh release upload "v$V" SHA256SUMS.txt --clobber
