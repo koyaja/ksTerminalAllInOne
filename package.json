@@ -1,7 +1,7 @@
 {
   "name": "kstermus",
   "productName": "KSTermus",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Client SSH / SFTP avec keychain chiffré, snippets et port forwarding",
   "author": "CYBERISK",
   "license": "UNLICENSED",
@@ -10,8 +10,8 @@
     "start": "electron .",
     "test": "node test/run-tests.js",
     "dist": "electron-builder --win nsis portable",
-    "dist:dir": "electron-builder --win dir",
-    "dist:linux": "electron-builder --linux && sh build/repack-deb.sh"
+    "dist:dir": "electron-builder --win dir --publish never",
+    "dist:linux": "electron-builder --linux --publish never && sh build/repack-deb.sh"
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.15",
@@ -79,7 +79,7 @@
         "deb",
         "tar.gz"
       ],
-      "icon": "assets/icon-1024.png",
+      "icon": "build/icons",
       "category": "Development",
       "executableName": "kstermus",
       "synopsis": "Client SSH / SFTP avec keychain chiffré",

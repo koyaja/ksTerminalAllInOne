@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.8.0** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.8.1** · Windows et **Linux**
 
 ---
 
@@ -523,6 +523,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.8.1** | Linux : icône KSTermus fournie dans toutes les tailles standard (16 à 512 px) — elle n'apparaissait pas dans le menu ni le dock ; release automatique GitHub Actions |
 | **1.8.0** | **Thèmes** : 7 thèmes + Automatique (Sombre doux / Clair sépia selon le système), aperçus, appliqués à l'interface, aux terminaux, à l'éditeur et à la barre de titre ; contrastes vérifiés par les tests |
 | **1.7.0** | **VPN WireGuard intégré** : profils `.conf`, association à un host ou à un groupe, démarrage automatique à la connexion, page VPN (état, handshake, trafic, démarrer / arrêter), sans droits administrateur |
 | **1.6.0** | **Restauration d'une sauvegarde** depuis l'écran de verrouillage ou les Paramètres (Windows ↔ Linux), export complet coffre + historique, ancien coffre conservé, anciens exports acceptés |
