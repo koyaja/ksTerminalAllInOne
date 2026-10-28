@@ -30,7 +30,12 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          if gh release view "v$V" >/dev/null 2>&1; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+          if gh release view "v$V" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            if gh release view "v$V" --json assets -q '.assets[].name' | grep -qx update.json; then echo "signed=true" >> "$GITHUB_OUTPUT"; else echo "signed=false" >> "$GITHUB_OUTPUT"; fi
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"; echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -102,3 +107,29 @@ jobs:
           V=${{ steps.v.outputs.version }}
           rm -f dist/release/notes.md
           gh release create "v$V" dist/release/* --title "KSTermus $V" --notes-file notes.md --target "$GITHUB_SHA"
+
+  # Release déjà publiée sans update.json (secret ajouté après coup) :
+  # signe l'archive Windows DÉJÀ publiée et ajoute update.json, sans rien reconstruire.
+  sign-existing:
+    runs-on: ubuntu-latest
+    needs: release
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signer la release existante
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ secrets.KSTERMUS_SIGNING_KEY }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          gh release view "v$V" >/dev/null 2>&1 || { echo "Pas de release v$V"; exit 0; }
+          if gh release view "v$V" --json assets -q '.assets[].name' | grep -qx update.json; then echo "update.json déjà présent"; exit 0; fi
+          [ -n "$KEY" ] || { echo "::warning::Secret KSTERMUS_SIGNING_KEY absent"; exit 0; }
+          mkdir -p "$RUNNER_TEMP/rel" && gh release download "v$V" -p "KSTermus-win-x64-$V.zip" -D "$RUNNER_TEMP/rel"
+          gh release view "v$V" --json body -q .body > "$RUNNER_TEMP/notes.md"
+          umask 077; printf '%s\n' "$KEY" > "$RUNNER_TEMP/k.pem"
+          node scripts/make-release.js --zip "$RUNNER_TEMP/rel/KSTermus-win-x64-$V.zip" --notes "$RUNNER_TEMP/notes.md" --key "$RUNNER_TEMP/k.pem"
+          rm -f "$RUNNER_TEMP/k.pem"
+          cmp "$RUNNER_TEMP/rel/KSTermus-win-x64-$V.zip" "dist/release/KSTermus-win-x64-$V.zip"
+          gh release upload "v$V" dist/release/update.json
+          echo "update.json ajouté à v$V"
