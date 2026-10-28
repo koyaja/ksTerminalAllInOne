@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.12.0** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.13.0** · Windows, Linux et **macOS**
 
 ---
 
@@ -98,6 +98,17 @@ Une mise à jour s'installe de la même façon : le coffre (`%APPDATA%\KSTermus`
 | `kstermus-<v>.tar.gz` (portable) | `tar xzf kstermus-1.5.1.tar.gz && ./kstermus-1.5.1/kstermus` |
 
 Sous Linux : terminaux locaux bash / zsh / fish, coffre dans `~/.config/KSTermus/`. Windows Hello n'existe pas ; les mises à jour sont **notifiées** (lien vers la release) mais pas installées automatiquement.
+
+### Option macOS (Apple Silicon et Intel)
+
+| Fichier | Pour |
+|---|---|
+| `KSTermus-<v>-mac-arm64.dmg` | Mac M1, M2, M3, M4 |
+| `KSTermus-<v>-mac-x64.dmg` | Mac Intel |
+
+Ouvrir le `.dmg`, glisser **KSTermus** dans **Applications**. L'application n'est pas notariée par Apple (pas de compte Apple Developer) : au premier lancement, **clic droit ▸ Ouvrir ▸ Ouvrir**, ou en Terminal : `xattr -dr com.apple.quarantine /Applications/KSTermus.app`.
+
+Sous macOS : raccourcis de l'application avec **Cmd** (Cmd+T, Cmd+Shift+P, Cmd+Shift+F…), **Ctrl** reste au terminal (Ctrl+C, Ctrl+R, préfixe tmux Ctrl+B) ; Cmd+C / Cmd+V copient-collent ; terminaux locaux zsh / bash ; coffre dans `~/Library/Application Support/KSTermus/`. Windows Hello n'existe pas ; les mises à jour sont notifiées (lien vers la release).
 
 ### Option 2 — Depuis les sources
 
@@ -425,6 +436,7 @@ npm start            # lancer en mode développement
 npm test             # tests d'intégration (voir « Tests »)
 npm run dist:dir     # application Windows dépliée dans dist/win-unpacked
 npm run dist:linux   # AppImage + .deb + .tar.gz dans dist/
+npm run dist:mac     # (sur un Mac) .dmg + .zip arm64 et x64, signature ad-hoc
 npm run dist         # installateur NSIS + version portable (nécessite Wine sous Linux)
 ```
 
@@ -542,7 +554,7 @@ npm run dist:dir     # → dist/win-unpacked/KSTermus.exe (icône et version inj
 
 ## Publier une release
 
-**Automatique (GitHub Actions)** : à chaque push sur `main` qui change la version de `package.json`, le workflow `.github/workflows/release.yml` construit Windows + Linux et publie la release `vX.Y.Z` (zip Windows, `.deb`, `.AppImage`, `.tar.gz`, `SHA256SUMS.txt`, notes tirées de l'historique ci-dessous). Relance manuelle : **Actions ▸ Release ▸ Run workflow**.
+**Automatique (GitHub Actions)** : à chaque push sur `main` qui change la version de `package.json`, le workflow `.github/workflows/release.yml` construit Windows + Linux (Ubuntu) et macOS (sur un Mac Apple Silicon de GitHub) et publie la release `vX.Y.Z` (zip Windows, `.deb`, `.AppImage`, `.tar.gz`, `.dmg` / `.zip` macOS arm64 et x64, `SHA256SUMS.txt`, notes tirées de l'historique ci-dessous). Relance manuelle : **Actions ▸ Release ▸ Run workflow**.
 
 Pour que les postes installés soient **notifiés** (mise à jour automatique), ajouter une fois le secret du dépôt **`KSTERMUS_SIGNING_KEY`** (*Settings ▸ Secrets and variables ▸ Actions ▸ New repository secret*) avec le contenu complet de `kstermus-update-signing.pem`. Sans ce secret, la release est publiée sans `update.json`.
 
@@ -571,6 +583,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.13.0** | **macOS** (Apple Silicon et Intel) : `.dmg` / `.zip` construits sur un Mac par GitHub Actions, signature ad-hoc, menu Édition (Cmd+C/V), raccourcis Cmd, boutons de fenêtre à gauche, moteur WireGuard macOS |
 | **1.12.0** | **Google Drive en connexion directe** pour la synchronisation (sans client Drive installé, idéal sous Linux) : OAuth + PKCE dans le navigateur, espace caché de l'application, jeton chiffré dans le coffre |
 | **1.11.0** | **Synchronisation chiffrée entre PC** (dossier cloud ou GitHub privé) : fusion à trois voies, résolution des conflits, automatique (modification, déverrouillage, 5 min), indicateur et liste des PC |
 | **1.10.0** | **SFTP** : double panneau PC ↔ serveur avec glisser-déposer, dépôt depuis l'explorateur, dossiers complets, file de transferts (vitesse, temps restant, annulation), gestion des conflits, sélection multiple, tri, filtre, raccourcis clavier, chmod, nouveau fichier ; corrigé : double-clic et rafraîchissement après création / renommage / suppression |

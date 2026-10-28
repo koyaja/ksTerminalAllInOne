@@ -905,9 +905,10 @@ function createWindow() {
     show: false,
     backgroundColor: winTheme.background,
     title: 'KSTermus',
-    icon: path.join(__dirname, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
-    titleBarStyle: 'hidden',
-    titleBarOverlay: { color: winTheme.color, symbolColor: winTheme.symbolColor, height: TITLEBAR_H },
+    icon: process.platform === 'darwin' ? undefined : path.join(__dirname, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 13 } } // feux tricolores à gauche
+      : { titleBarStyle: 'hidden', titleBarOverlay: { color: winTheme.color, symbolColor: winTheme.symbolColor, height: TITLEBAR_H } }),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
@@ -916,7 +917,14 @@ function createWindow() {
       spellcheck: false
     }
   });
-  Menu.setApplicationMenu(null);
+  // macOS : un menu est indispensable pour Cmd+C / Cmd+V / Cmd+A / Cmd+Q dans les champs de saisie.
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { role: 'editMenu' },
+      { label: 'Fenêtre', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'togglefullscreen' }, { role: 'front' }] }
+    ]));
+  } else Menu.setApplicationMenu(null);
   if (st.maximized) win.maximize();
   if (st.fullscreen) win.setFullScreen(true);
   win.once('ready-to-show', () => { win.show(); win.focus(); });
@@ -986,7 +994,7 @@ handle('window:theme', ({ color, symbolColor, background }) => {
   const ok = (c) => typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c);
   if (!ok(color) || !ok(symbolColor) || !ok(background)) throw new Error('Couleurs invalides');
   if (win && !win.isDestroyed()) {
-    try { win.setTitleBarOverlay({ color, symbolColor, height: TITLEBAR_H }); } catch { /* plateforme sans overlay */ }
+    if (process.platform !== 'darwin') { try { win.setTitleBarOverlay({ color, symbolColor, height: TITLEBAR_H }); } catch { /* plateforme sans overlay */ } }
     win.setBackgroundColor(background);
   }
   try { fs.writeFileSync(themeFile, JSON.stringify({ color, symbolColor, background })); } catch { /* ignore */ }

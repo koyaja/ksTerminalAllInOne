@@ -2,8 +2,8 @@
 # (ou à la main : Actions ▸ Release ▸ Run workflow).
 #   · Windows : KSTermus-win-x64-<v>.zip (+ update.json signé si le secret existe)
 #   · Linux   : .deb, .AppImage, .tar.gz
-# Secret optionnel KSTERMUS_SIGNING_KEY = contenu de kstermus-update-signing.pem :
-# sans lui, la release est publiée mais les postes installés ne sont pas notifiés.
+#   · macOS   : .dmg et .zip pour Apple Silicon (arm64) et Intel (x64), signature ad-hoc
+# Secret optionnel KSTERMUS_SIGNING_KEY = contenu de kstermus-update-signing.pem.
 name: Release
 
 on:
@@ -20,99 +20,137 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      exists: ${{ steps.v.outputs.exists }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Version
-        id: v
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           V=$(node -p "require('./package.json').version")
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          if gh release view "v$V" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            if gh release view "v$V" --json assets -q '.assets[].name' | grep -qx update.json; then echo "signed=true" >> "$GITHUB_OUTPUT"; else echo "signed=false" >> "$GITHUB_OUTPUT"; fi
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"; echo "signed=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
+          if gh release view "v$V" >/dev/null 2>&1; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
 
+  build-linux-windows:
+    needs: prepare
+    if: needs.prepare.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        if: steps.v.outputs.exists == 'false'
-        with:
-          node-version: 22
-          cache: npm
-
+        with: { node-version: 22, cache: npm }
       - name: Dépendances
-        if: steps.v.outputs.exists == 'false'
         run: |
           npm ci
-          # PTY Windows précompilé (npm l'ignore sous Linux)
           npm pack @lydell/node-pty-win32-x64@1.2.0-beta.15
           mkdir -p node_modules/@lydell/node-pty-win32-x64
           tar xzf lydell-node-pty-win32-x64-*.tgz -C node_modules/@lydell/node-pty-win32-x64 --strip-components=1
-
-      - name: Tests (hors serveur SSH)
-        if: steps.v.outputs.exists == 'false'
-        run: node -e "for (const m of ['vault','vpn','lock','updater','hello']) require('./src/main/' + m); require('./src/renderer/themes.js'); console.log('modules OK')"
-
+      - name: Contrôle des modules
+        run: node -e "for (const m of ['vault','vpn','lock','updater','hello','sync','gdrive','audit','sftp-jobs']) require('./src/main/' + m); console.log('modules OK')"
       - name: Build Linux
-        if: steps.v.outputs.exists == 'false'
         run: npm run dist:linux
-
       - name: Build Windows
-        if: steps.v.outputs.exists == 'false'
         run: |
           npm run dist:dir
           rm -rf dist/pkg && mkdir -p dist/pkg && cp -r dist/win-unpacked dist/pkg/KSTermus
           (cd dist/pkg && zip -qr -9 ../KSTermus-win-x64.zip KSTermus)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-windows
+          path: |
+            dist/KSTermus-win-x64.zip
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.tar.gz
+          if-no-files-found: error
 
-      - name: Notes de version
-        if: steps.v.outputs.exists == 'false'
+  build-macos:
+    needs: prepare
+    if: needs.prepare.outputs.exists == 'false'
+    runs-on: macos-14
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - name: Dépendances (PTY macOS arm64 + x64)
         run: |
-          V=${{ steps.v.outputs.version }}
+          npm ci
+          for a in arm64 x64; do
+            if [ ! -d node_modules/@lydell/node-pty-darwin-$a ]; then
+              npm pack @lydell/node-pty-darwin-$a@1.2.0-beta.15
+              mkdir -p node_modules/@lydell/node-pty-darwin-$a
+              tar xzf lydell-node-pty-darwin-$a-*.tgz -C node_modules/@lydell/node-pty-darwin-$a --strip-components=1
+            fi
+          done
+      - name: Contrôle des modules
+        run: node -e "for (const m of ['vault','vpn','lock','updater','sync','gdrive','audit','sftp-jobs']) require('./src/main/' + m); console.log('modules OK')"
+      - name: Build macOS (dmg + zip, arm64 + x64)
+        run: npm run dist:mac
+      - name: Vérification de la signature
+        run: |
+          for app in dist/mac*/KSTermus.app; do codesign --verify --deep --strict "$app" && echo "OK $app"; done
+          ls -la dist/*.dmg dist/*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/*.dmg
+            dist/KSTermus-*-mac-*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build-linux-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Notes de version
+        run: |
+          V=${{ needs.prepare.outputs.version }}
           LINE=$(grep -F "| **$V** |" README.md | head -1 | sed -E 's/^\| \*\*[^*]+\*\* \| //; s/ \|$//')
           {
             echo "${LINE:-KSTermus $V}"
             echo
-            echo "**Windows** : extraire \`KSTermus-win-x64-$V.zip\` dans \`%LOCALAPPDATA%\\Programs\\\` (ou mise à jour automatique depuis l'application)."
+            echo "**Windows** : mise à jour automatique depuis l'application, ou extraire \`KSTermus-win-x64-$V.zip\` dans \`%LOCALAPPDATA%\\Programs\\\`."
             echo "**Linux** : \`sudo apt install ./kstermus_${V}_amd64.deb\`, ou l'AppImage, ou le .tar.gz."
+            echo "**macOS** : \`KSTermus-$V-mac-arm64.dmg\` (Apple Silicon M1–M4) ou \`-mac-x64.dmg\` (Intel). Première ouverture : clic droit ▸ Ouvrir (application non notariée), ou \`xattr -dr com.apple.quarantine /Applications/KSTermus.app\`."
           } > notes.md
           cat notes.md
-
       - name: Signer la mise à jour Windows
-        if: steps.v.outputs.exists == 'false'
         env:
           KEY: ${{ secrets.KSTERMUS_SIGNING_KEY }}
         run: |
-          V=${{ steps.v.outputs.version }}
+          V=${{ needs.prepare.outputs.version }}
+          ZIP=artifacts/linux-windows/KSTermus-win-x64.zip
           if [ -n "$KEY" ]; then
             umask 077; printf '%s\n' "$KEY" > "$RUNNER_TEMP/k.pem"
-            node scripts/make-release.js --zip dist/KSTermus-win-x64.zip --notes notes.md --key "$RUNNER_TEMP/k.pem"
+            node scripts/make-release.js --zip "$ZIP" --notes notes.md --key "$RUNNER_TEMP/k.pem"
             rm -f "$RUNNER_TEMP/k.pem"
           else
-            echo "::warning::Secret KSTERMUS_SIGNING_KEY absent : pas d'update.json, les postes ne seront pas notifiés."
-            mkdir -p dist/release && cp dist/KSTermus-win-x64.zip "dist/release/KSTermus-win-x64-$V.zip"
+            echo "::warning::Secret KSTERMUS_SIGNING_KEY absent : pas d'update.json."
+            mkdir -p dist/release && cp "$ZIP" "dist/release/KSTermus-win-x64-$V.zip"
           fi
-          cp dist/kstermus_${V}_amd64.deb dist/KSTermus-${V}-x86_64.AppImage dist/kstermus-${V}.tar.gz dist/release/
+          rm -f dist/release/notes.md
+          cp artifacts/linux-windows/*.deb artifacts/linux-windows/*.AppImage artifacts/linux-windows/*.tar.gz dist/release/
+          cp artifacts/macos/* dist/release/
           (cd dist/release && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
-
       - name: Publier
-        if: steps.v.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          V=${{ steps.v.outputs.version }}
-          rm -f dist/release/notes.md
+          V=${{ needs.prepare.outputs.version }}
           gh release create "v$V" dist/release/* --title "KSTermus $V" --notes-file notes.md --target "$GITHUB_SHA"
 
-  # Release déjà publiée sans update.json (secret ajouté après coup) :
-  # signe l'archive Windows DÉJÀ publiée et ajoute update.json, sans rien reconstruire.
   sign-existing:
     runs-on: ubuntu-latest
-    needs: release
+    needs: [prepare, publish]
     if: always()
     steps:
       - uses: actions/checkout@v4

@@ -514,3 +514,7 @@ table.files .ficon { display: inline-block; width: 22px; }
 details.guide { margin-top: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
 details.guide summary { cursor: pointer; font-weight: 600; }
 details.guide ol { margin: 8px 0 0; padding-left: 20px; line-height: 1.55; user-select: text; }
+
+/* ---------- 1.13.0 : macOS ---------- */
+body.os-darwin .tabbar { padding-left: 76px; padding-right: 0; }
+body.os-darwin .lock .drag-strip { padding-left: 80px; }

@@ -1516,6 +1516,8 @@
 
   // Raccourcis globaux (phase de capture : passent avant xterm)
   document.addEventListener('keydown', (e) => {
+    // macOS : Cmd pour les raccourcis de l'application ; Ctrl reste au terminal.
+    const mod = api.platform === 'darwin' ? e.metaKey : e.ctrlKey;
     if (!S || !$('#lock').hidden) return;
     if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
     const k = e.key.toLowerCase();
@@ -1525,32 +1527,32 @@
     const inModal = !!document.querySelector('.backdrop, .palette');
     if (ui.prefixAt && Date.now() - ui.prefixAt < PREFIX_MS && !inModal) { stop(); setPrefix(false); runPrefixCommand(e, term); return; }
     if (!inModal && isPrefix(e) && (term || ui.activeTab === 'home')) { stop(); setPrefix(true); return; }
-    if (term && e.ctrlKey && !e.altKey && e.code === 'KeyF' && (e.shiftKey || S.settings.ctrlFSearch) && !inModal) { stop(); openTermSearch(term.panes.get(term.activePane)); return; }
-    if (e.ctrlKey && e.shiftKey && k === 'l') { stop(); api.invoke('lock:screen').catch(() => {}); return; }
-    if (e.ctrlKey && e.shiftKey && k === 'p') { stop(); openPalette(); return; }
+    if (term && mod && !e.altKey && e.code === 'KeyF' && (e.shiftKey || S.settings.ctrlFSearch) && !inModal) { stop(); openTermSearch(term.panes.get(term.activePane)); return; }
+    if (mod && e.shiftKey && k === 'l') { stop(); api.invoke('lock:screen').catch(() => {}); return; }
+    if (mod && e.shiftKey && k === 'p') { stop(); openPalette(); return; }
     if (inModal) return;
-    if (e.ctrlKey && !e.shiftKey && k === 's' && t && t.kind === 'edit') { stop(); t.save(); return; }
-    if (e.ctrlKey && e.key === 'Tab') {
+    if (mod && !e.shiftKey && k === 's' && t && t.kind === 'edit') { stop(); t.save(); return; }
+    if (mod && e.key === 'Tab') {
       stop();
       const ids = ['home', ...tabs.keys()];
       const i = ids.indexOf(ui.activeTab);
       activateTab(ids[(i + (e.shiftKey ? -1 : 1) + ids.length) % ids.length]);
-    } else if (e.ctrlKey && e.shiftKey && k === 't') { stop(); openLocal(); }
-    else if (e.ctrlKey && !e.shiftKey && !e.altKey && k === 't') { stop(); quickConnect(); }
-    else if (e.ctrlKey && e.shiftKey && k === 'w' && ui.activeTab !== 'home') {
+    } else if (mod && e.shiftKey && k === 't') { stop(); openLocal(); }
+    else if (mod && !e.shiftKey && !e.altKey && k === 't') { stop(); quickConnect(); }
+    else if (mod && e.shiftKey && k === 'w' && ui.activeTab !== 'home') {
       stop();
       if (term && term.panes.size > 1) closePane(term, term.activePane); else closeTab(ui.activeTab);
-    } else if (term && e.ctrlKey && e.shiftKey && k === 'd') { stop(); splitPane(term, term.activePane, 'row'); }
-    else if (term && e.ctrlKey && e.shiftKey && k === 'e') { stop(); splitPane(term, term.activePane, 'col'); }
-    else if (term && e.ctrlKey && e.shiftKey && k === 'b') { stop(); toggleBroadcast(term); }
-    else if (term && e.ctrlKey && e.shiftKey && k === 'enter') { stop(); toggleZoom(term, term.activePane); }
-    else if (term && e.ctrlKey && e.shiftKey && (k === 'arrowup' || k === 'arrowdown')) { stop(); jumpCommand(term.panes.get(term.activePane), k === 'arrowup' ? -1 : 1); }
-    else if (term && e.ctrlKey && e.shiftKey && k === 'o') { stop(); copyLastOutput(term.panes.get(term.activePane)); }
-    else if (term && e.altKey && !e.ctrlKey && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(k)) { stop(); focusNeighbor(term, k.slice(5)); }
-    else if (e.ctrlKey && !e.shiftKey && (k === '=' || k === '+')) { stop(); setFontSize((S.settings.fontSize || 14) + 1); }
-    else if (e.ctrlKey && !e.shiftKey && k === '-') { stop(); setFontSize((S.settings.fontSize || 14) - 1); }
-    else if (e.ctrlKey && !e.shiftKey && k === '0') { stop(); setFontSize(14); }
-    else if (e.ctrlKey && /^[1-9]$/.test(e.key) && !e.shiftKey && !e.altKey) {
+    } else if (term && mod && e.shiftKey && k === 'd') { stop(); splitPane(term, term.activePane, 'row'); }
+    else if (term && mod && e.shiftKey && k === 'e') { stop(); splitPane(term, term.activePane, 'col'); }
+    else if (term && mod && e.shiftKey && k === 'b') { stop(); toggleBroadcast(term); }
+    else if (term && mod && e.shiftKey && k === 'enter') { stop(); toggleZoom(term, term.activePane); }
+    else if (term && mod && e.shiftKey && (k === 'arrowup' || k === 'arrowdown')) { stop(); jumpCommand(term.panes.get(term.activePane), k === 'arrowup' ? -1 : 1); }
+    else if (term && mod && e.shiftKey && k === 'o') { stop(); copyLastOutput(term.panes.get(term.activePane)); }
+    else if (term && e.altKey && !mod && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(k)) { stop(); focusNeighbor(term, k.slice(5)); }
+    else if (mod && !e.shiftKey && (k === '=' || k === '+')) { stop(); setFontSize((S.settings.fontSize || 14) + 1); }
+    else if (mod && !e.shiftKey && k === '-') { stop(); setFontSize((S.settings.fontSize || 14) - 1); }
+    else if (mod && !e.shiftKey && k === '0') { stop(); setFontSize(14); }
+    else if (mod && /^[1-9]$/.test(e.key) && !e.shiftKey && !e.altKey) {
       stop();
       const ids = ['home', ...tabs.keys()];
       const n = Number(e.key);
