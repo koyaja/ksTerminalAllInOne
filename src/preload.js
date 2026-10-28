@@ -21,5 +21,7 @@ contextBridge.exposeInMainWorld('kst', {
   answerHostKey: (reqId, ok) => ipcRenderer.send('hostkey:answer', { reqId, ok }),
   answerPrompt: (reqId, answers) => ipcRenderer.send('ssh:promptAnswer', { reqId, answers }),
   activity: () => ipcRenderer.send('app:activity'),
+  auditCommand: (sessionId, command, danger, local) => ipcRenderer.send('audit:command', { sessionId, command, danger, local }),
+  auditDangerCancelled: (sessionId, command, reasons) => ipcRenderer.send('audit:dangerCancelled', { sessionId, command, reasons }),
   platform: process.platform
 });

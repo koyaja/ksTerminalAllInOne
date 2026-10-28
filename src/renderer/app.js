@@ -445,7 +445,7 @@
     const el = $('#section');
     el.replaceChildren(({
       hosts: viewHosts, keychain: viewKeychain, snippets: viewSnippets,
-      forwards: viewForwards, vpn: viewVpn, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal
+      forwards: viewForwards, vpn: viewVpn, audit: viewAudit, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal
     })[ui.section]());
   }
 
@@ -485,13 +485,18 @@
     return out;
   }
 
+  function envBadge(env) {
+    if (!env) return null;
+    const L = { prod: 'PROD', staging: 'RECETTE', dev: 'DEV' };
+    return h('span', { class: 'env-badge env-' + env, text: L[env] || env });
+  }
   function hostCard(x) {
     const authLabel = { password: 'mot de passe', key: 'clé', agent: 'agent' }[x.auth] || x.auth;
-    const card = h('div', { class: 'card', ondblclick: () => openTerminal(x.id) },
+    const card = h('div', { class: 'card' + (x.env === 'prod' ? ' card-prod' : ''), ondblclick: () => openTerminal(x.id) },
       h('div', { class: 'card-top' },
         h('div', { class: 'avatar', style: { background: x.color || COLORS[0] }, text: initials(x.label) }),
         h('div', { style: { minWidth: 0, flex: 1 } },
-          h('div', { class: 'card-title', text: x.label }),
+          h('div', { class: 'card-title' }, h('span', { text: x.label }), envBadge(x.env), x.record ? h('span', { class: 'rec-badge', title: 'Sessions enregistrées' }, '●REC') : null),
           h('div', { class: 'card-sub', text: `${x.username}@${x.hostname}${x.port !== 22 ? ':' + x.port : ''}` }),
           vpnBadge(x),
           x.jumpHostId && hostById(x.jumpHostId) ? h('div', { class: 'card-via', title: 'Connexion via un jump host', text: `↪ via ${jumpChain(x).join(' → ')}` }) : null)),
@@ -539,9 +544,13 @@
       startup: h('input', { value: x.startupCommand || '', placeholder: 'ex. cd /var/www && ls' }),
       jump: h('select', {}, h('option', { value: '', text: 'Connexion directe' }),
         S.hosts.filter(z => z.id !== x.id).sort((a, b) => a.label.localeCompare(b.label)).map(z => h('option', { value: z.id, text: `${z.label} (${z.username}@${z.hostname})` }))),
+      env: h('select', {}, h('option', { value: '', text: '—' }), h('option', { value: 'dev', text: 'Développement' }), h('option', { value: 'staging', text: 'Recette / staging' }), h('option', { value: 'prod', text: '🔴 PRODUCTION' })),
+      record: h('input', { type: 'checkbox' }),
       vpn: h('select', {}, h('option', { value: '', text: 'Comme le groupe' }), h('option', { value: 'none', text: 'Aucun VPN' }),
         (S.vpns || []).map(v => h('option', { value: v.id, text: '🌐 ' + v.name })))
     };
+    f.env.value = x.env || '';
+    f.record.checked = !!x.record;
     f.vpn.value = x.vpnId && (x.vpnId === 'none' || (S.vpns || []).some(v => v.id === x.vpnId)) ? x.vpnId : '';
     const vpnHint = () => {
       const gv = (S.groupVpns || {})[f.group.value.trim()];
@@ -582,6 +591,8 @@
         field('Utilisateur', f.username),
         field('Authentification', f.auth), keyWrap, pwWrap, clearWrap,
         sudoWrap, clearSudoWrap,
+        h('div', { class: 'form-row' }, field('Environnement', f.env, 'PROD : confirmation obligatoire avant toute commande dangereuse (rm -rf, DROP, reboot…).'),
+          h('label', { class: 'check', style: { alignSelf: 'center', marginTop: '14px' } }, f.record, 'Enregistrer les sessions')),
         field('VPN WireGuard', f.vpn, 'Démarré automatiquement à la connexion. Avec un jump host, c\'est le VPN du bastion qui compte.'),
         field('Passer par (jump host / bastion)', f.jump, 'La connexion passe d\'abord par ce serveur, qui peut lui-même passer par un autre (plusieurs rebonds).'),
         field('Commande au démarrage', f.startup),
@@ -593,7 +604,7 @@
             port: f.port.value, username: f.username.value, auth: f.auth.value, keyId: f.keyId.value,
             password: f.password.value, clearPassword: f.clear.checked,
             sudoPassword: f.sudoPassword.value, clearSudoPassword: f.clearSudo.checked, startupCommand: f.startup.value, color,
-            jumpHostId: f.jump.value || null, vpnId: f.vpn.value
+            jumpHostId: f.jump.value || null, vpnId: f.vpn.value, env: f.env.value, record: f.record.checked
           }));
           if (!s) return false;
           setState(s); return true;
@@ -821,6 +832,135 @@
   }
 
   // ---------- Known hosts ----------
+  // ---------- Journal d'audit et enregistrements ----------
+  const AUDIT_TYPES = {
+    connect: ['🔌', 'Connexion'], 'connect-failed': ['⛔', 'Connexion échouée'], disconnect: ['⏏', 'Déconnexion'], command: ['❯', 'Commande'],
+    'danger-confirmed': ['⚠', 'Commande dangereuse exécutée'], 'danger-cancelled': ['✋', 'Commande dangereuse annulée'],
+    'file-save': ['💾', 'Fichier enregistré'], sftp: ['📁', 'SFTP'], vpn: ['🌐', 'VPN'], secret: ['🔑', 'Secret consulté'],
+    unlock: ['🔓', 'Déverrouillage'], 'unlock-failed': ['🚫', 'Déverrouillage refusé'], lock: ['🔒', 'Verrouillage'],
+    backup: ['📤', 'Export'], restore: ['📥', 'Restauration'], settings: ['⚙', 'Réglage']
+  };
+  const auditUi = { tab: 'events', period: '7', type: '', host: '', text: '' };
+  function auditDetail(e) {
+    const parts = [];
+    if (e.command) parts.push(e.command);
+    if (e.danger) parts.push('⚠ ' + e.danger);
+    if (e.path) parts.push(e.path + (e.sudo ? ' (sudo)' : ''));
+    if (e.action) parts.push(e.action);
+    if (e.what) parts.push(e.what);
+    if (e.method) parts.push(e.method);
+    if (e.vpn) parts.push(e.vpn);
+    if (e.remote) parts.push('distant : ' + e.remote);
+    if (e.local) parts.push('local : ' + e.local);
+    if (e.file) parts.push(e.file);
+    if (e.reason) parts.push(e.reason);
+    if (e.durationSec !== undefined) parts.push(`durée ${fmtDuration(e.durationSec)}`);
+    if (e.error) parts.push('erreur : ' + e.error);
+    if (e.failedAt) parts.push('le ' + new Date(e.failedAt).toLocaleString('fr-FR'));
+    if (e.recording) parts.push('● enregistrée');
+    return parts.join(' · ');
+  }
+  function fmtDuration(sec) { sec = Math.round(sec || 0); const hh = Math.floor(sec / 3600), mm = Math.floor(sec % 3600 / 60), ss = sec % 60; return (hh ? hh + ' h ' : '') + (hh || mm ? mm + ' min ' : '') + ss + ' s'; }
+  function auditQuery() {
+    const since = auditUi.period === 'all' ? null : new Date(Date.now() - Number(auditUi.period) * 86400000).toISOString();
+    return { since, types: auditUi.type ? auditUi.type.split(',') : null, host: auditUi.host || null, text: auditUi.text, limit: 3000 };
+  }
+  function viewAudit() {
+    const seg = h('div', { class: 'seg' },
+      h('button', { class: auditUi.tab === 'events' ? 'on' : '', onclick: () => { auditUi.tab = 'events'; renderSection(); } }, 'Événements'),
+      h('button', { class: auditUi.tab === 'rec' ? 'on' : '', onclick: () => { auditUi.tab = 'rec'; renderSection(); } }, 'Enregistrements'));
+    const head = h('div', { class: 'section-head' }, h('h1', { text: 'Journal' }), seg);
+    const box = h('div', {}, h('div', { class: 'muted small', text: 'Chargement…' }));
+    if (auditUi.tab === 'rec') loadRecordings(box); else loadEvents(box);
+    return h('div', {}, head, box);
+  }
+  async function loadEvents(box) {
+    const sel = (key, opts) => { const el = h('select', {}, opts.map(([v, l]) => h('option', { value: v, text: l }))); el.value = auditUi[key]; el.addEventListener('change', () => { auditUi[key] = el.value; renderSection(); }); return el; };
+    const search = h('input', { class: 'search', placeholder: 'Rechercher (commande, chemin…)', value: auditUi.text });
+    let tmr; search.addEventListener('input', () => { clearTimeout(tmr); tmr = setTimeout(() => { auditUi.text = search.value; renderSection(); const s2 = $('#section .audit-filters .search'); if (s2) { s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length); } }, 300); });
+    const filters = h('div', { class: 'audit-filters' },
+      sel('period', [['1', '24 h'], ['7', '7 jours'], ['30', '30 jours'], ['365', '1 an'], ['all', 'Tout']]),
+      sel('type', [['', 'Tous les événements'], ['command,danger-confirmed,danger-cancelled', 'Commandes'], ['danger-confirmed,danger-cancelled', 'Commandes dangereuses'], ['connect,connect-failed,disconnect', 'Connexions'], ['file-save,sftp', 'Fichiers'], ['unlock,unlock-failed,lock,secret', 'Accès au coffre'], ['vpn', 'VPN']]),
+      sel('host', [['', 'Tous les hosts'], ...S.hosts.map(x => [x.label, x.label])]),
+      search,
+      h('button', { class: 'btn sm', onclick: async () => { const f = await guard(() => api.invoke('audit:exportCsv', auditQuery())); if (f) toast('Exporté : ' + f); } }, 'Exporter CSV'));
+    let r;
+    try { r = await api.invoke('audit:query', auditQuery()); }
+    catch (e) { box.replaceChildren(filters, h('div', { class: 'empty', text: e.message })); return; }
+    if (S.settings.auditEnabled === false) filters.append(h('span', { class: 'badge', text: 'journal désactivé (Paramètres)' }));
+    const rows = r.entries.map(e => {
+      const [ic, label] = AUDIT_TYPES[e.type] || ['•', e.type];
+      return h('tr', { class: 't-' + e.type },
+        h('td', { class: 'when', text: new Date(e.at).toLocaleString('fr-FR') }),
+        h('td', { text: `${ic} ${label}` }),
+        h('td', { text: e.host ? e.host + (e.user ? ` (${e.user})` : '') : '' }),
+        h('td', { class: 'det', text: auditDetail(e) }));
+    });
+    box.replaceChildren(filters,
+      r.entries.length ? h('div', { class: 'audit-wrap' }, h('table', { class: 'audit' }, h('thead', {}, h('tr', {}, h('th', { text: 'Date' }), h('th', { text: 'Événement' }), h('th', { text: 'Host' }), h('th', { text: 'Détail' }))), h('tbody', {}, rows)))
+        : h('div', { class: 'empty', text: 'Aucun événement pour ces filtres.' }),
+      h('p', { class: 'muted small', text: `${r.entries.length} événement(s)${r.truncated ? ' (limite atteinte, affine les filtres)' : ''}${r.bad ? ` · ${r.bad} ligne(s) illisible(s)` : ''}. Chiffré dans le dossier de KSTermus ; l'export CSV, lui, est en clair.` }));
+  }
+  async function loadRecordings(box) {
+    let list;
+    try { list = await api.invoke('rec:list'); } catch (e) { box.replaceChildren(h('div', { class: 'empty', text: e.message })); return; }
+    const mode = S.settings.recordSessions || 'marked';
+    const hint = h('p', { class: 'muted small', text: mode === 'off' ? 'Enregistrement désactivé (Paramètres).' : mode === 'all' ? 'Toutes les sessions SSH sont enregistrées.' : 'Seuls les hosts cochés « Enregistrer les sessions » sont enregistrés (formulaire du host).' });
+    if (!list.length) { box.replaceChildren(hint, h('div', { class: 'empty', text: 'Aucun enregistrement.' })); return; }
+    box.replaceChildren(hint, h('div', { class: 'list' }, list.map(r => h('div', { class: 'row' },
+      h('span', { class: 'dot ' + (r.live ? 'on' : 'stop') }),
+      h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: r.error ? r.id : `${r.hostLabel} — ${r.user}` }),
+        h('div', { class: 'muted small', text: r.error ? r.error : `${new Date(r.at).toLocaleString('fr-FR')} · ${fmtBytes(r.size)}${r.live ? ' · en cours' : ''}` })),
+      r.error ? null : h('button', { class: 'btn sm primary', onclick: () => playRecording(r) }, '▶ Relire'),
+      r.error ? null : h('button', { class: 'icon-btn', title: 'Exporter en .cast (asciinema, non chiffré)', onclick: async () => { const f = await guard(() => api.invoke('rec:export', r.id)); if (f) toast('Exporté : ' + f); } }, '⤓'),
+      h('button', { class: 'icon-btn', title: 'Supprimer', onclick: async () => { if (await confirmBox('Supprimer l\'enregistrement', 'Supprimer définitivement cet enregistrement ?')) { if (await guard(() => api.invoke('rec:delete', r.id))) renderSection(); } } }, '🗑')))));
+  }
+  // Lecteur : temps morts plafonnés à 2 s, vitesse x1 à x8, barre de progression.
+  async function playRecording(r) {
+    const rec = await guard(() => api.invoke('rec:load', r.id));
+    if (!rec) return;
+    const IDLE = 2;
+    let t = 0; const evs = [];
+    let last = 0;
+    for (const e of rec.events) { const gap = Math.min(e[0] - last, IDLE); t += Math.max(0, gap); last = e[0]; evs.push([t, e[1], e[2]]); }
+    const total = evs.length ? evs[evs.length - 1][0] : 0;
+    const host = h('div', { class: 'player-term' });
+    const range = h('input', { type: 'range', min: 0, max: Math.max(1, Math.round(total * 10)), value: 0 });
+    const time = h('span', { class: 'time' });
+    const playBtn = h('button', { class: 'btn sm primary', type: 'button' }, '⏸');
+    const speed = h('select', { style: { width: '80px' } }, [1, 2, 4, 8].map(v => h('option', { value: v, text: 'x' + v })));
+    const term = new Terminal({ fontFamily: '"Cascadia Mono", Consolas, monospace', fontSize: 13, theme: TERM_THEME, cols: rec.header.width, rows: rec.header.height, disableStdin: true, scrollback: 5000 });
+    let i = 0, pos = 0, playing = true, raf = 0, lastTick = 0;
+    const fmt = (x) => { x = Math.floor(x); return `${Math.floor(x / 60)}:${String(x % 60).padStart(2, '0')}`; };
+    const apply = (e) => { if (e[1] === 'o') term.write(e[2]); else if (e[1] === 'r') { const [c, rr] = String(e[2]).split('x').map(Number); if (c && rr) term.resize(c, rr); } };
+    const seek = (to) => { term.reset(); term.resize(rec.header.width, rec.header.height); i = 0; pos = to; let buf = ''; while (i < evs.length && evs[i][0] <= to) { if (evs[i][1] === 'o') buf += evs[i][2]; else { term.write(buf); buf = ''; apply(evs[i]); } i++; } term.write(buf); };
+    const tick = (now) => {
+      if (!playing) return;
+      const dt = lastTick ? (now - lastTick) / 1000 * Number(speed.value) : 0; lastTick = now;
+      pos += dt;
+      let buf = '';
+      while (i < evs.length && evs[i][0] <= pos) { if (evs[i][1] === 'o') buf += evs[i][2]; else { term.write(buf); buf = ''; apply(evs[i]); } i++; }
+      if (buf) term.write(buf);
+      range.value = Math.round(pos * 10); time.textContent = `${fmt(pos)} / ${fmt(total)}`;
+      if (i >= evs.length) { playing = false; playBtn.textContent = '↺'; return; }
+      raf = requestAnimationFrame(tick);
+    };
+    playBtn.onclick = () => {
+      if (i >= evs.length) { seek(0); }
+      playing = !playing; playBtn.textContent = playing ? '⏸' : '▶'; lastTick = 0;
+      if (playing) raf = requestAnimationFrame(tick);
+    };
+    range.addEventListener('input', () => { seek(Number(range.value) / 10); time.textContent = `${fmt(pos)} / ${fmt(total)}`; lastTick = 0; });
+    const p = modal({
+      title: `▶ ${r.hostLabel} — ${new Date(r.at).toLocaleString('fr-FR')}`, wide: true,
+      body: [h('div', { class: 'player' }, host, h('div', { class: 'player-bar' }, playBtn, range, time, speed))],
+      onOpen: (form) => { form.style.width = 'min(1100px, calc(100vw - 32px))'; term.open(host); raf = requestAnimationFrame(tick); },
+      actions: [{ label: 'Fermer', value: null }]
+    });
+    await p;
+    playing = false; cancelAnimationFrame(raf); term.dispose();
+  }
+
   // ---------- VPN WireGuard ----------
   function vpnById(id) { return (S.vpns || []).find(v => v.id === id); }
   function effectiveVpn(x) {
@@ -1011,6 +1151,12 @@
     c.addEventListener('change', () => onChange(c));
     return c;
   }
+  function settingSelect(title, desc, key, def, options, numeric) {
+    const sel = h('select', { style: { width: '220px' } }, options.map(([v, l]) => h('option', { value: String(v), text: l })));
+    sel.value = String(S.settings[key] === undefined ? def : S.settings[key]);
+    sel.addEventListener('change', async () => { const st = await guard(() => api.invoke('settings:save', { [key]: numeric ? Number(sel.value) : sel.value })); if (st) S = st; });
+    return h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: title }), h('div', { class: 'muted small', text: desc })), sel);
+  }
   function securityRows() {
     const lockSel = h('select', { style: { width: '150px' } }, [[0, 'Jamais'], [1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 heure'], [240, '4 heures']].map(([v, l]) => h('option', { value: String(v), text: l })));
     lockSel.value = String(S.settings.autoLockMinutes === undefined ? 15 : S.settings.autoLockMinutes);
@@ -1042,7 +1188,15 @@
       h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Verrouillage automatique' }), h('div', { class: 'muted small', text: 'Après cette durée sans clavier ni souris dans KSTermus. Les sessions et tunnels continuent ; Ctrl+Shift+L verrouille tout de suite.' })), lockSel),
       h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Verrouiller avec Windows' }), h('div', { class: 'muted small', text: 'Quand la session Windows se verrouille (Win+L) ou que le PC se met en veille.' })),
         checkbox(S.settings.lockOnSystemLock !== false, async (c) => { const s = await guard(() => api.invoke('settings:save', { lockOnSystemLock: c.checked })); if (s) S = s; })),
-      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Windows Hello' }), helloInfo), helloSel)
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Windows Hello' }), helloInfo), helloSel),
+      settingSelect('Alerte commandes dangereuses', 'rm -rf, DROP, mkfs, reboot, git push --force… : confirmation en retapant le nom du host.', 'dangerMode', 'prod',
+        [['prod', 'Hosts marqués PROD'], ['all', 'Tous les terminaux'], ['off', 'Désactivée']]),
+      settingSelect('Journal d\'audit', 'Connexions, commandes, fichiers modifiés, transferts, VPN, déverrouillages — chiffré, consultable dans Journal.', 'auditRetentionDays', 180,
+        [[30, 'Garder 30 jours'], [90, 'Garder 90 jours'], [180, 'Garder 6 mois'], [365, 'Garder 1 an'], [0, 'Garder tout']], true),
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Activer le journal d\'audit' })),
+        checkbox(S.settings.auditEnabled !== false, async (c) => { const s = await guard(() => api.invoke('settings:save', { auditEnabled: c.checked })); if (s) S = s; })),
+      settingSelect('Enregistrement des sessions SSH', 'Tout ce qui s\'affiche est enregistré (chiffré) pour être relu dans Journal ▸ Enregistrements. Les mots de passe tapés à une invite masquée ne s\'affichent pas, donc ne sont pas enregistrés.', 'recordSessions', 'marked',
+        [['marked', 'Hosts cochés « Enregistrer »'], ['all', 'Toutes les sessions SSH'], ['off', 'Jamais']])
     ];
   }
 
@@ -1402,6 +1556,7 @@
     const titleEl = h('span', { class: 'pane-title', text: title0 });
     const head = h('div', { class: 'pane-head' },
       dot, h('span', { class: 'pane-kind', text: isLocal ? (shell ? shell.icon : '❯') : '🖧' }), titleEl, h('span', { class: 'pane-sub', text: sub0 }),
+      !isLocal ? envBadge(host.env) : null, !isLocal && host.record || (!isLocal && S.settings.recordSessions === 'all') ? h('span', { class: 'rec-badge', title: 'Session enregistrée' }, '●REC') : null,
       h('span', { class: 'spacer' }),
       h('button', { class: 'icon-btn mini', title: 'Copier la sortie de la dernière commande', onclick: (e) => { e.stopPropagation(); copyLastOutput(p); } }, '⧉'),
       isLocal ? h('button', { class: 'icon-btn mini', title: 'Détacher (la session continue en arrière-plan) — préfixe d', onclick: (e) => { e.stopPropagation(); detachPane(t, id); } }, '⏏') : null,
@@ -1409,7 +1564,7 @@
       h('button', { class: 'icon-btn mini', title: 'Diviser en bas', onclick: (e) => { e.stopPropagation(); setActivePane(t, id); splitPane(t, id, 'col'); } }, '⊟'),
       h('button', { class: 'icon-btn mini', title: 'Agrandir / restaurer (Ctrl+Shift+Entrée · préfixe z)', onclick: (e) => { e.stopPropagation(); toggleZoom(t, id); } }, '⤢'),
       h('button', { class: 'icon-btn mini', title: 'Fermer le panneau (Ctrl+Shift+W · préfixe x)', onclick: (e) => { e.stopPropagation(); closePane(t, id); } }, '✕'));
-    const el = h('div', { class: 'pane' + (isLocal ? ' local' : '') }, head, wrap);
+    const el = h('div', { class: 'pane' + (isLocal ? ' local' : '') + (!isLocal && host.env === 'prod' ? ' pane-prod' : '') }, head, wrap);
     head.addEventListener('dblclick', () => toggleZoom(t, id));
 
     const term = new Terminal({
@@ -1438,10 +1593,44 @@
     t.panes.set(id, p);
 
     const setPaneStatus = (st) => { p.status = st; dot.className = 'dot ' + st; renderTabs(); };
+    const sendInput = (d, danger) => {
+      const targets = t.broadcast ? [...t.panes.values()].filter(q => q.status === 'on') : (p.status === 'on' ? [p] : []);
+      for (const q of targets) {
+        if (/[\r\n]/.test(d)) {
+          if (q.term.buffer.active.type === 'normal') {
+            markCommand(q);
+            if (!q.isLocal) for (const c of commandsIn(q, d)) api.auditCommand(q.id, c, danger || null, false);
+          }
+          resetTyping(q);
+          const tail = d.split(/\r\n|\r|\n/).pop();
+          if (tail) trackTyping(q, tail);
+        } else trackTyping(q, d);
+        api.write(q.id, d);
+      }
+    };
     const writeInput = (d) => {
-      if (d.includes('\r') && term.buffer.active.type === 'normal') markCommand(p);
-      if (t.broadcast) { for (const q of t.panes.values()) if (q.status === 'on') { if (q !== p && d.includes('\r') && q.term.buffer.active.type === 'normal') markCommand(q); api.write(q.id, d); } }
-      else if (p.status === 'on') api.write(id, d);
+      // Collage « bracketed paste » : le shell n'exécute rien avant un vrai Entrée.
+      if (d.startsWith('\x1b[200~')) {
+        for (const q of (t.broadcast ? [...t.panes.values()].filter(x => x.status === 'on') : (p.status === 'on' ? [p] : []))) {
+          const inner = d.replace(/^\x1b\[200~/, '').replace(/\x1b\[201~$/, '');
+          if (/[\r\n]/.test(inner)) q.typedOk = false; else trackTyping(q, inner);
+          api.write(q.id, d);
+        }
+        return;
+      }
+      if (/[\r\n]/.test(d)) {
+        const targets = t.broadcast ? [...t.panes.values()].filter(q => q.status === 'on') : [p];
+        const risky = [];
+        for (const q of targets) {
+          if (!dangerCheckOn(q) || q.term.buffer.active.type !== 'normal') continue;
+          const hits = commandsIn(q, d, true).map(c => ({ q, c, why: window.KST_DANGER.check(c) })).filter(x => x.why.length);
+          // Variantes tapé / écran de la même ligne : on garde la plus complète.
+          const firstLine = hits.filter(x => !d.split(/\r\n|\r|\n/).slice(1).includes(x.c)).sort((a2, b2) => b2.c.length - a2.c.length)[0];
+          for (const x of hits) if (x === firstLine || d.split(/\r\n|\r|\n/).slice(1).includes(x.c)) risky.push(x);
+        }
+        if (risky.length) { confirmDanger(risky).then(ok => { if (ok) sendInput(d, risky.flatMap(r => r.why)); }); return; }
+      }
+      sendInput(d);
     };
     p.writeInput = writeInput;
     term.onData(writeInput);
@@ -1563,6 +1752,78 @@
   }
 
   // ---------- Blocs de commandes (façon Warp) ----------
+  // Ligne de commande en cours (lue à l'écran, invite retirée), lignes repliées comprises.
+  function currentLine(q) {
+    const b = q.term.buffer.active;
+    let y = b.baseY + b.cursorY;
+    let line = b.getLine(y);
+    if (!line) return '';
+    let text = line.translateToString(true);
+    while (line && line.isWrapped && y > 0) { y--; line = b.getLine(y); text = line.translateToString(true) + text; }
+    return window.KST_DANGER.stripPrompt(text);
+  }
+  // Suivi des touches tapées depuis le dernier Entrée : l'écran peut être en retard
+  // (écho du serveur pas encore revenu), donc on garde aussi ce qui a été tapé.
+  function trackTyping(q, d) {
+    if (q.typed === undefined) { q.typed = ''; q.typedOk = true; }
+    for (let i = 0; i < d.length; i++) {
+      const ch = d[i];
+      if (ch === '\x1b') { q.typedOk = false; break; }                 // flèches, historique… : on se fie à l'écran
+      if (ch === '\x7f' || ch === '\b') q.typed = q.typed.slice(0, -1);
+      else if (ch === '\x15' || ch === '\x03') { q.typed = ''; q.typedOk = true; } // Ctrl+U, Ctrl+C
+      else if (ch === '\t' || ch === '\x12' || ch === '\x17') q.typedOk = false; // complétion, recherche, Ctrl+W
+      else if (ch >= ' ') q.typed += ch;
+    }
+  }
+  // Commandes validées par cette saisie (Entrée simple ou collage multi-lignes).
+  // `all` : renvoie aussi les variantes (tapé / lu à l'écran) pour le contrôle de danger.
+  function commandsIn(q, d, all) {
+    const parts = d.split(/\r\n|\r|\n/);
+    const screen = (currentLine(q) + parts[0]).trim();
+    const typed = q.typedOk !== false && q.typed ? (q.typed + parts[0]).trim() : '';
+    const out = [];
+    if (all) { for (const c of new Set([typed, screen])) if (c) out.push(c); }
+    else { const best = typed || screen; if (best) out.push(best); }
+    for (let i = 1; i < parts.length - 1; i++) if (parts[i].trim()) out.push(parts[i].trim());
+    return out;
+  }
+  function resetTyping(q) { q.typed = ''; q.typedOk = true; }
+  function dangerCheckOn(q) {
+    const mode = (S && S.settings.dangerMode) || 'prod';
+    if (mode === 'off') return false;
+    if (mode === 'all') return true;
+    const host = q.hostId && hostById(q.hostId);
+    return !!(host && host.env === 'prod');
+  }
+  // Confirmation renforcée : retaper le nom du host (comme la suppression d'un dépôt GitHub).
+  async function confirmDanger(risky) {
+    const hosts = [...new Set(risky.map(r => r.q.isLocal ? 'Terminal local' : (hostById(r.q.hostId) || {}).label || '?'))];
+    const target = hosts[0];
+    const input = h('input', { placeholder: target, autocomplete: 'off', spellcheck: 'false' });
+    const prod = risky.some(r => !r.q.isLocal && (hostById(r.q.hostId) || {}).env === 'prod');
+    const body = [
+      h('div', { class: 'callout danger' },
+        h('div', { style: { fontWeight: 700, marginBottom: '6px' }, text: (prod ? '⚠ Serveur de PRODUCTION : ' : '⚠ ') + hosts.join(', ') }),
+        risky.map(r => h('div', { style: { marginTop: '6px' } }, h('code', { class: 'danger-cmd', text: r.c }), h('div', { class: 'small', text: '→ ' + r.why.join(' · ') })))),
+      h('p', { class: 'small', text: `Pour exécuter quand même, tape « ${target} » ci-dessous. Échap ou Annuler : la commande reste sur la ligne, non exécutée.` }),
+      input
+    ];
+    let okBtn;
+    const ok = await modal({
+      title: 'Commande dangereuse', body, wide: true,
+      onOpen: (form) => {
+        okBtn = form.querySelector('footer button.danger');
+        const sync = () => { okBtn.disabled = input.value.trim().toLowerCase() !== target.toLowerCase(); };
+        input.addEventListener('input', sync); sync();
+        setTimeout(() => input.focus(), 40);
+      },
+      actions: [{ label: 'Annuler', value: false }, { label: 'Exécuter', class: 'danger solid', submit: true, onClick: () => input.value.trim().toLowerCase() === target.toLowerCase() ? true : false }]
+    });
+    if (!ok) for (const r of risky) api.auditDangerCancelled(r.q.id, r.c, r.why);
+    const tq = risky[0].q; setTimeout(() => tq.term.focus(), 30);
+    return !!ok;
+  }
+
   function markCommand(p) {
     const term = p.term;
     const marker = term.registerMarker(0);

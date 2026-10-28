@@ -16,6 +16,7 @@ const { LockController } = require('./lock');
 const { Hello } = require('./hello');
 const { Updater } = require('./updater');
 const { VpnManager, parseWgConf, describeConf, defaultBinPath } = require('./vpn');
+const { AuditLog, Recorder, newLogKey } = require('./audit');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -23,6 +24,7 @@ const hello = new Hello({ dir: app.getPath('userData'), safeStorage });
 // Verrouillage d'écran : sessions conservées, interface et IPC bloqués.
 const lock = new LockController({
   onLock: (reason) => {
+    try { audit.log('lock', { method: 'écran', reason }); } catch { /* ignore */ }
     clearSecretClipboard();
     if (win && !win.isDestroyed()) win.webContents.send('app:locked', { reason });
   }
@@ -60,7 +62,11 @@ const pendingPrompts = new Map();
 
 const manager = new SshManager({
   vault,
-  emit: (channel, payload) => { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); },
+  emit: (channel, payload) => {
+    if (channel === 'term:data') recorder.output(payload.sessionId, payload.data);
+    else if (channel === 'term:exit') sessionEnded(payload.sessionId, payload.reason);
+    if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+  },
   // Questions keyboard-interactive (2FA / OTP…) posées à l'utilisateur ; null = annulé.
   askPrompts: (info) => new Promise(resolve => {
     const reqId = crypto.randomUUID();
@@ -101,6 +107,84 @@ const localMgr = new LocalManager((channel, payload) => { if (win && !win.isDest
 
 const uid = () => crypto.randomUUID();
 
+// ----- Journal d'audit + enregistrement des sessions (chiffrés, clé de données dans le coffre) -----
+function logKey() {
+  if (!vault.isUnlocked()) return null;
+  const d = vault.data;
+  d.secrets = d.secrets || {};
+  if (!d.secrets.logKey) { d.secrets.logKey = newLogKey(); vault.save(); }
+  return Buffer.from(d.secrets.logKey, 'base64');
+}
+const appSettings = () => (vault.isUnlocked() ? vault.data.settings || {} : {});
+const audit = new AuditLog({ dir: path.join(app.getPath('userData'), 'audit'), getKey: logKey, enabled: () => appSettings().auditEnabled !== false });
+const recorder = new Recorder({ dir: path.join(app.getPath('userData'), 'recordings'), getKey: logKey });
+const sessionInfo = new Map(); // sessionId -> { hostId, host, user, at }
+// Échecs de déverrouillage : le coffre est fermé (pas de clé), on les note en clair
+// (date seulement, aucune donnée) et on les verse au journal au prochain déverrouillage.
+const failFile = path.join(app.getPath('userData'), 'unlock-failures.json');
+function noteUnlockFailure(kind) {
+  let a = []; try { a = JSON.parse(fs.readFileSync(failFile, 'utf8')); } catch { /* vide */ }
+  a.push({ at: new Date().toISOString(), kind }); if (a.length > 200) a = a.slice(-200);
+  try { fs.writeFileSync(failFile, JSON.stringify(a), { mode: 0o600 }); } catch { /* ignore */ }
+}
+function flushUnlockFailures() {
+  let a = []; try { a = JSON.parse(fs.readFileSync(failFile, 'utf8')); } catch { return; }
+  for (const f of a) audit.log('unlock-failed', { method: f.kind, failedAt: f.at });
+  try { fs.unlinkSync(failFile); } catch { /* ignore */ }
+}
+function hostMeta(hostId) {
+  const h = vault.isUnlocked() && vault.data.hosts.find(x => x.id === hostId);
+  return h ? { hostId, host: h.label, user: h.username, address: `${h.hostname}:${h.port || 22}` } : { hostId, host: '?' };
+}
+function shouldRecord(hostId) {
+  const mode = appSettings().recordSessions || 'marked';
+  const h = vault.isUnlocked() && vault.data.hosts.find(x => x.id === hostId);
+  return mode === 'all' || (mode === 'marked' && h && h.record);
+}
+function sessionEnded(sessionId, reason) {
+  const info = sessionInfo.get(sessionId);
+  if (!info) return;
+  sessionInfo.delete(sessionId);
+  const rec = recorder.stop(sessionId);
+  audit.log('disconnect', { ...info.meta, sessionId, reason: reason || '', durationSec: Math.round((Date.now() - info.at) / 1000), recording: rec || undefined });
+}
+// Événements tirés des appels IPC réussis / échoués.
+function auditHook(channel, args, result, error) {
+  const A = (type, data) => audit.log(type, data);
+  switch (channel) {
+    case 'vault:unlock': case 'vault:create':
+      if (!error) { flushUnlockFailures(); A('unlock', { method: channel === 'vault:create' ? 'création' : 'mot de passe' }); } else noteUnlockFailure('mot de passe'); break;
+    case 'vault:unlockScreen': if (!error) A('unlock', { method: 'écran (mot de passe)' }); else A('unlock-failed', { method: 'écran verrouillé' }); break;
+    case 'hello:unlock': if (!error) { flushUnlockFailures(); A('unlock', { method: 'Windows Hello' }); } break;
+    case 'lock:screen': if (!error && result) A('lock', { method: 'écran (manuel)' }); break;
+    case 'ssh:open': {
+      const [sessionId, hostId, cols, rows] = args;
+      const meta = hostMeta(hostId);
+      if (error) { A('connect-failed', { ...meta, error: String(error.message || error) }); break; }
+      const recId = shouldRecord(hostId) ? recorder.start(sessionId, { hostId, hostLabel: meta.host, user: meta.user, cols, rows }) : null;
+      sessionInfo.set(sessionId, { meta, at: Date.now() });
+      A('connect', { ...meta, sessionId, recording: recId || undefined });
+      break;
+    }
+    case 'ssh:close': sessionEnded(args[0], 'onglet fermé'); break;
+    case 'sftp:open': if (!error) A('sftp', { ...hostMeta(args[1]), action: 'ouverture' }); else A('connect-failed', { ...hostMeta(args[1]), kind: 'SFTP', error: String(error.message || error) }); break;
+    case 'sftp:download': if (!error && result) A('sftp', { action: 'téléchargement', remote: args[1], local: result }); break;
+    case 'sftp:upload': if (!error) A('sftp', { action: 'envoi', local: args[1], remote: args[2] }); break;
+    case 'editor:write': if (!error) A('file-save', { ...hostMeta(args[1]), path: args[2], sudo: !!(args[4] && args[4].sudo), bytes: Buffer.byteLength(String(args[3] || '')) }); break;
+    case 'host:revealPassword': if (!error) A('secret', { ...hostMeta(args[0]), action: 'affichage', what: args[1] === 'sudo' ? 'mot de passe sudo' : 'mot de passe' }); break;
+    case 'host:copyPassword': if (!error) A('secret', { ...hostMeta(args[0]), action: 'copie', what: args[1] === 'sudo' ? 'mot de passe sudo' : 'mot de passe' }); break;
+    case 'key:revealPassphrase': if (!error) A('secret', { action: 'affichage', what: 'passphrase de clé' }); break;
+    case 'vault:backup': if (!error && result) A('backup', { file: result }); break;
+    case 'vault:restore': if (!error) A('restore', {}); break;
+    case 'vault:changePassword': if (!error) A('settings', { action: 'mot de passe maître changé' }); break;
+    case 'vpn:start': if (!error) A('vpn', { action: 'démarrage', vpn: (vault.data.vpns || []).find(v => v.id === args[0])?.name }); else A('vpn', { action: 'échec', vpn: (vault.data.vpns || []).find(v => v.id === args[0])?.name, error: String(error.message || error) }); break;
+    case 'vpn:stop': if (!error) A('vpn', { action: 'arrêt', vpn: (vault.data.vpns || []).find(v => v.id === args[0])?.name }); break;
+    case 'host:delete': if (!error) A('settings', { action: 'host supprimé', hostId: args[0] }); break;
+    case 'hello:configure': if (!error) A('settings', { action: 'Windows Hello', value: args[0] }); break;
+    default: break;
+  }
+}
+
 function requireUnlocked() {
   if (!vault.isUnlocked()) throw new Error('Coffre verrouillé');
   return vault.data;
@@ -127,8 +211,14 @@ function publicState() {
 function handle(channel, fn) {
   ipcMain.handle(channel, async (_e, ...args) => {
     if (!lock.allowed(channel)) return { ok: false, error: 'Écran verrouillé' };
-    try { return { ok: true, value: await fn(...args) }; }
-    catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
+    try {
+      const value = await fn(...args);
+      try { auditHook(channel, args, value, null); } catch { /* le journal ne doit jamais casser l'action */ }
+      return { ok: true, value };
+    } catch (err) {
+      try { auditHook(channel, args, null, err); } catch { /* ignore */ }
+      return { ok: false, error: err && err.message ? err.message : String(err) };
+    }
   });
 }
 
@@ -139,7 +229,7 @@ handle('vault:status', () => ({
   helloScreen: vault.isUnlocked() && !!(vault.data.settings || {}).helloScreen,
   version: app.getVersion()
 }));
-function afterUnlock() { lock.unlock(); applyLockSettings(); return publicState(); }
+function afterUnlock() { lock.unlock(); applyLockSettings(); try { purgeOld(); } catch { /* ignore */ } return publicState(); }
 handle('vault:create', (pw) => { vault.create(pw); return afterUnlock(); });
 handle('vault:unlock', (pw) => {
   lock.checkThrottle();
@@ -147,7 +237,11 @@ handle('vault:unlock', (pw) => {
   return afterUnlock();
 });
 // Verrouillage complet : ferme tout et efface la clé de la mémoire.
-handle('vault:lock', () => { manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock(); lock.unlock(); return true; });
+handle('vault:lock', () => {
+  audit.log('lock', { method: 'coffre (tout fermé)' });
+  for (const sid of [...sessionInfo.keys()]) sessionEnded(sid, 'coffre verrouillé');
+  manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); recorder.stopAll(); vault.lock(); lock.unlock(); return true;
+});
 // Verrouillage d'écran : les sessions continuent.
 handle('lock:screen', () => { if (!vault.isUnlocked()) return false; return lock.lock('manuel'); });
 handle('vault:unlockScreen', (pw) => {
@@ -216,6 +310,44 @@ handle('settings:save', (s) => {
   return publicState();
 });
 
+// ----- Journal d'audit / enregistrements -----
+handle('audit:query', (q) => audit.query(q || {}));
+handle('audit:exportCsv', async (q) => {
+  const { entries } = audit.query({ ...(q || {}), limit: 100000 });
+  const r = await dialog.showSaveDialog(win, { title: 'Exporter le journal (non chiffré)', defaultPath: path.join(app.getPath('documents'), `kstermus-audit-${new Date().toISOString().slice(0, 10)}.csv`), filters: [{ name: 'CSV', extensions: ['csv'] }] });
+  if (r.canceled || !r.filePath) return false;
+  const cols = ['at', 'type', 'host', 'user', 'address', 'command', 'path', 'action', 'method', 'reason', 'error', 'durationSec', 'danger', 'remote', 'local', 'vpn'];
+  const esc = (v) => { const s = v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v); return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  fs.writeFileSync(r.filePath, '\uFEFF' + [cols.join(';'), ...entries.map(e => cols.map(c => esc(e[c])).join(';'))].join('\r\n'));
+  audit.log('backup', { action: 'export du journal', file: r.filePath });
+  return r.filePath;
+});
+// Commande validée dans un terminal (texte lu à l'écran) ; danger = confirmée malgré l'alerte.
+ipcMain.on('audit:command', (_e, { sessionId, command, danger, local }) => {
+  if (!vault.isUnlocked() || typeof command !== 'string' || !command.trim()) return;
+  const info = sessionInfo.get(sessionId);
+  audit.log(danger ? 'danger-confirmed' : 'command', { ...(info ? info.meta : { host: local ? 'Terminal local' : '?' }), sessionId, command: command.slice(0, 4000), danger: Array.isArray(danger) ? danger.join(' · ') : undefined });
+});
+ipcMain.on('audit:dangerCancelled', (_e, { sessionId, command, reasons }) => {
+  if (!vault.isUnlocked()) return;
+  const info = sessionInfo.get(sessionId);
+  audit.log('danger-cancelled', { ...(info ? info.meta : {}), sessionId, command: String(command || '').slice(0, 4000), danger: (reasons || []).join(' · ') });
+});
+handle('rec:list', () => recorder.list());
+handle('rec:load', (id) => { requireUnlocked(); const r = recorder.load(id); audit.log('secret', { action: 'relecture d\'un enregistrement', host: r.header.kst && r.header.kst.hostLabel, recording: id }); return r; });
+handle('rec:delete', (id) => { requireUnlocked(); recorder.remove(id); audit.log('settings', { action: 'enregistrement supprimé', recording: id }); return true; });
+handle('rec:export', async (id) => {
+  requireUnlocked();
+  const r = await dialog.showSaveDialog(win, { title: 'Exporter l\'enregistrement (asciicast, non chiffré)', defaultPath: path.join(app.getPath('documents'), id + '.cast'), filters: [{ name: 'asciicast', extensions: ['cast'] }] });
+  if (r.canceled || !r.filePath) return false;
+  fs.writeFileSync(r.filePath, recorder.toCast(id));
+  audit.log('backup', { action: 'export d\'un enregistrement', file: r.filePath, recording: id });
+  return r.filePath;
+});
+// Rétention du journal (au déverrouillage, puis chaque jour).
+function purgeOld() { const d = appSettings().auditRetentionDays; if (vault.isUnlocked() && d) audit.purge(Number(d)); }
+setInterval(purgeOld, 24 * 3600 * 1000).unref();
+
 // ----- VPN -----
 handle('vpn:save', (input) => {
   const d = requireUnlocked();
@@ -280,6 +412,8 @@ handle('host:save', (input) => {
     startupCommand: input.startupCommand || '',
     jumpHostId: input.jumpHostId || null,
     vpnId: input.vpnId || '',
+    env: ['dev', 'staging', 'prod'].includes(input.env) ? input.env : '',
+    record: !!input.record,
     color: input.color || '',
     notes: input.notes || '',
     password: existing ? existing.password : '',
@@ -464,6 +598,7 @@ ipcMain.on('hostkey:answer', (_e, { reqId, ok }) => {
 handle('ssh:open', (sessionId, hostId, cols, rows) => manager.openShell(sessionId, hostId, cols, rows));
 ipcMain.on('app:activity', () => lock.activity());
 ipcMain.on('ssh:write', (_e, { sessionId, data }) => lock.locked ? undefined : localMgr.has(sessionId) ? localMgr.write(sessionId, data) : manager.write(sessionId, data));
+ipcMain.on('ssh:resize', (_e, { sessionId, cols, rows }) => { if (recorder.isRecording(sessionId)) recorder.resize(sessionId, cols, rows); }); // enregistrement
 ipcMain.on('ssh:resize', (_e, { sessionId, cols, rows }) => localMgr.has(sessionId) ? localMgr.resize(sessionId, cols, rows) : manager.resize(sessionId, cols, rows));
 handle('ssh:close', (sessionId) => { if (localMgr.has(sessionId)) localMgr.kill(sessionId); else manager.close(sessionId); return true; });
 

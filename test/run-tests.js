@@ -546,6 +546,68 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     });
   } else console.log('  (tests VPN de bout en bout ignorés : binaires kst-wg absents)');
 
+  console.log('Sécurité : commandes dangereuses, audit, enregistrement');
+  await test('commandes dangereuses : détectées, sans faux positifs courants', async () => {
+    const D = require('../src/renderer/danger.js');
+    const bad = ['rm -rf /', 'sudo rm -rf / --no-preserve-root', 'rm -rf ~', 'rm -fr /var', 'rm -rf *', 'rm -Rf /etc/nginx', 'mkfs.ext4 /dev/sdb1', 'dd if=/dev/zero of=/dev/sda bs=1M', 'sudo reboot', 'shutdown -h now', 'systemctl stop sshd', 'iptables -F', 'DROP DATABASE prod;', 'TRUNCATE orders;', 'DELETE FROM users;', 'UPDATE users SET admin=1;', 'git push --force origin main', 'docker system prune -a', 'docker compose down -v', 'kubectl delete ns prod', 'terraform destroy', ':(){ :|:& };:', 'crontab -r', 'redis-cli FLUSHALL', 'chmod -R 777 /', 'echo x > /etc/passwd'];
+    const ok = ['rm -rf /tmp/build', 'rm -rf node_modules', 'ls -la /', 'systemctl restart nginx', 'DELETE FROM users WHERE id=4;', 'UPDATE users SET a=1 WHERE id=2;', 'git push origin main', 'git push --force-with-lease', 'dd if=/dev/sda of=disk.img', 'cat /etc/passwd', 'echo reboot needed', 'grep -r shutdown /etc'];
+    for (const c of bad) assert.ok(D.check(c).length, 'non détectée : ' + c);
+    for (const c of ok) assert.deepStrictEqual(D.check(c), [], 'faux positif : ' + c);
+    assert.strictEqual(D.stripPrompt('root@prod:~# rm -rf /'), 'rm -rf /');
+    assert.strictEqual(D.stripPrompt('mysql> DROP DATABASE x;'), 'DROP DATABASE x;');
+    assert.strictEqual(D.stripPrompt('[root@srv ~]# reboot'), 'reboot');
+  });
+  await test('journal d\'audit : chiffré, filtré, illisible sans la clé, purge', async () => {
+    const { AuditLog, newLogKey } = require('../src/main/audit');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-audit-'));
+    let key = Buffer.from(newLogKey(), 'base64');
+    const al = new AuditLog({ dir, getKey: () => key });
+    al.log('connect', { host: 'ProdKS', user: 'root' });
+    al.log('command', { host: 'ProdKS', command: 'mysql -uroot -pS3cretPass' });
+    al.log('danger-confirmed', { host: 'ProdKS', command: 'rm -rf /var/www/old', danger: 'Suppression récursive' });
+    al.log('command', { host: 'QOS', command: 'ls' });
+    const raw = fs.readdirSync(dir).map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('');
+    assert.ok(!raw.includes('S3cretPass') && !raw.includes('ProdKS'), 'rien en clair sur disque');
+    assert.strictEqual(al.query().entries.length, 4);
+    assert.strictEqual(al.query().entries[0].command, 'ls', 'plus récent d\'abord');
+    assert.strictEqual(al.query({ host: 'ProdKS' }).entries.length, 3);
+    assert.strictEqual(al.query({ types: ['danger-confirmed'] }).entries.length, 1);
+    assert.strictEqual(al.query({ text: 'mysql' }).entries.length, 1);
+    key = Buffer.alloc(32, 1);
+    const r = al.query();
+    assert.strictEqual(r.entries.length, 0); assert.strictEqual(r.bad, 4, 'mauvaise clé : lignes illisibles comptées');
+    key = null; assert.throws(() => al.query(), /verrouillé/); assert.strictEqual(al.log('x'), false);
+    fs.writeFileSync(path.join(dir, 'audit-2020-01.kslog'), 'x\n');
+    key = Buffer.alloc(32, 2);
+    assert.strictEqual(al.purge(90), 1);
+    assert.ok(!fs.existsSync(path.join(dir, 'audit-2020-01.kslog')));
+  });
+  await test('enregistrement de session : chiffré, relu, export asciicast, limite de taille', async () => {
+    const { Recorder, newLogKey } = require('../src/main/audit');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-rec-'));
+    const key = Buffer.from(newLogKey(), 'base64');
+    const rc = new Recorder({ dir, getKey: () => key, flushMs: 20, maxBytes: 2000 });
+    const id = rc.start('s1', { hostId: 'h', hostLabel: 'ProdKS', user: 'root', cols: 100, rows: 30 });
+    rc.output('s1', 'root@prod:~# '); await sleep(30);
+    rc.output('s1', 'echo SECRET-OUTPUT\r\nSECRET-OUTPUT\r\n'); rc.resize('s1', 120, 40);
+    rc.stop('s1');
+    assert.ok(!fs.readFileSync(path.join(dir, id + '.ksrec'), 'utf8').includes('SECRET-OUTPUT'), 'chiffré');
+    const L = rc.list(); assert.strictEqual(L[0].hostLabel, 'ProdKS'); assert.strictEqual(L[0].live, false);
+    const r = rc.load(id);
+    assert.strictEqual(r.header.width, 100);
+    assert.ok(r.events.some(e => e[1] === 'o' && e[2].includes('SECRET-OUTPUT')));
+    assert.ok(r.events.some(e => e[1] === 'r' && e[2] === '120x40'));
+    assert.ok(r.events[1][0] >= r.events[0][0], 'temps croissants');
+    const cast = rc.toCast(id).trim().split('\n');
+    assert.strictEqual(JSON.parse(cast[0]).version, 2); assert.ok(!('kst' in JSON.parse(cast[0])));
+    const id2 = rc.start('s2', { hostId: 'h', hostLabel: 'X', user: 'u', cols: 80, rows: 24 });
+    rc.output('s2', 'x'.repeat(2500));
+    assert.strictEqual(rc.isRecording('s2'), false, 'arrêt à la limite');
+    assert.ok(rc.load(id2).events.some(e => String(e[2]).includes('limite')));
+    rc.remove(id2); assert.strictEqual(rc.list().length, 1);
+    assert.throws(() => rc.fileOf('../x'), /invalide/);
+  });
+
   console.log('Thèmes');
   await test('thèmes : contrastes lisibles, thèmes recommandés « doux » (7 à 12:1)', async () => {
     const TH = require('../src/renderer/themes.js');

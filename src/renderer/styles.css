@@ -443,3 +443,32 @@ textarea.mono { font-family: var(--mono); font-size: 12.5px; width: 100%; resize
 body.theme-light .backdrop { background: color-mix(in srgb, var(--text) 35%, transparent); }
 body.theme-light .modal, body.theme-light .lock-card, body.theme-light .menu, body.theme-light .palette-box { box-shadow: 0 18px 50px color-mix(in srgb, var(--text) 22%, transparent); }
 body.theme-light .overlay { background: color-mix(in srgb, var(--bg) 85%, transparent); }
+
+/* ---------- 1.9.0 : sécurité ---------- */
+.env-badge { display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 800; letter-spacing: .5px; padding: 1px 6px; border-radius: 4px; vertical-align: 2px; font-family: var(--sans); }
+.env-prod { background: var(--danger); color: #fff; }
+.env-staging { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+.env-dev { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+.rec-badge { margin-left: 6px; font-size: 9.5px; font-weight: 800; color: var(--danger); letter-spacing: .3px; vertical-align: 2px; }
+.card.card-prod { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.pane.pane-prod { border-color: color-mix(in srgb, var(--danger) 55%, transparent); }
+.pane.pane-prod .pane-head { box-shadow: inset 0 2px 0 var(--danger); }
+code.danger-cmd { display: block; padding: 6px 8px; border-radius: 6px; background: var(--term-bg); color: var(--text); white-space: pre-wrap; word-break: break-all; user-select: text; }
+.audit-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 12px; align-items: center; }
+.audit-filters select, .audit-filters input { width: auto; min-width: 140px; }
+table.audit { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.audit th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11.5px; padding: 6px 10px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg-2); }
+table.audit td { padding: 6px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; user-select: text; }
+table.audit td.when { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+table.audit td.det { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+table.audit tr.t-danger-confirmed td { background: color-mix(in srgb, var(--danger) 9%, transparent); }
+table.audit tr.t-connect-failed td, table.audit tr.t-unlock-failed td { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.audit-wrap { max-height: calc(100vh - 230px); overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { background: transparent; border: 0; padding: 6px 14px; cursor: pointer; color: var(--muted); }
+.seg button.on { background: var(--bg-4); color: var(--text); font-weight: 600; }
+.player { display: flex; flex-direction: column; gap: 8px; }
+.player-term { background: var(--term-bg); border-radius: 8px; padding: 6px; height: 56vh; overflow: hidden; }
+.player-bar { display: flex; align-items: center; gap: 8px; }
+.player-bar input[type=range] { flex: 1; padding: 0; }
+.player-bar .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 96px; text-align: right; }
