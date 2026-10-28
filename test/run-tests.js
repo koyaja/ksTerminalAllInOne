@@ -8,6 +8,7 @@ const path = require('path');
 const net = require('net');
 const http = require('http');
 const { utils } = require('ssh2');
+const crypto2 = require('crypto');
 const { Vault } = require('../src/main/vault');
 const { SshManager } = require('../src/main/ssh-manager');
 const { parseSshConfig } = require('../src/main/ssh-config');
@@ -474,6 +475,76 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.ok(PS_VERIFY.includes('RequestVerificationAsync($env:KST_HELLO_MSG)'));
     assert.ok(PS_VERIFY.includes('ContentType=WindowsRuntime'));
   });
+
+  console.log('VPN WireGuard');
+  const { VpnManager, parseWgConf, describeConf } = require('../src/main/vpn');
+  const { spawn: spawnProc } = require('child_process');
+  const wgKey = () => { const k = crypto2.generateKeyPairSync('x25519'); const jw = k.privateKey.export({ format: 'jwk' }); return { priv: Buffer.from(jw.d, 'base64url'), pub: Buffer.from(jw.x, 'base64url') }; };
+  await test('VPN : lecture d\'un .conf wg-quick, erreurs claires', async () => {
+    const k = wgKey(), s2 = wgKey();
+    const conf = `[Interface]\n# client\nPrivateKey = ${k.priv.toString('base64')}\nAddress = 10.66.0.2/32, fd00::2/128\nDNS = 10.66.0.1, corp.local\n\n[Peer]\nPublicKey = ${s2.pub.toString('base64')}\nEndpoint = vpn.example.com:51820\nAllowedIPs = 10.66.0.0/24\nPersistentKeepalive = 15\n`;
+    const c = parseWgConf(conf);
+    assert.strictEqual(c.privateKey, k.priv.toString('hex'));
+    assert.deepStrictEqual(c.addresses, ['10.66.0.2/32', 'fd00::2/128']);
+    assert.deepStrictEqual(c.dns, ['10.66.0.1']);
+    assert.strictEqual(c.peers[0].keepalive, 15);
+    assert.ok(!JSON.stringify(describeConf(conf)).includes(k.priv.toString('base64')), 'résumé sans clé');
+    assert.throws(() => parseWgConf(conf.replace(/PrivateKey.*\n/, '')), /PrivateKey manquant/);
+    assert.throws(() => parseWgConf(conf.replace(/PublicKey = .*/, 'PublicKey = abc')), /PublicKey invalide/);
+    assert.throws(() => parseWgConf(conf.replace(/Endpoint.*\n/, '')), /Endpoint manquant/);
+  });
+  const WGBIN = path.join(__dirname, '..', 'native', 'kst-wg', 'kst-wg-linux-x64');
+  const PEERBIN = path.join(__dirname, '..', 'native', 'kst-wg', 'testpeer-linux-x64');
+  if (process.platform === 'linux' && fs.existsSync(WGBIN) && fs.existsSync(PEERBIN)) {
+    await test('VPN : SSH à travers un vrai tunnel WireGuard (serveur joignable seulement dans le VPN)', async () => {
+      const cli = wgKey(), srvK = wgKey();
+      const udpPort = 51000 + Math.floor(Math.random() * 500);
+      const peer = spawnProc(PEERBIN, [], { stdio: ['pipe', 'pipe', 'inherit'] });
+      peer.stdin.write(JSON.stringify({ PrivateKey: srvK.priv.toString('hex'), Address: '10.66.0.1', PeerPublicKey: cli.pub.toString('hex'), PeerAllowed: '10.66.0.2/32', Target: `${H}:${P}`, ListenPort: udpPort, TunnelPort: 22 }) + '\n');
+      await new Promise(r => peer.stdout.once('data', r));
+      const profile = { id: 'vpn1', name: 'VPN test', config: `[Interface]\nPrivateKey = ${cli.priv.toString('base64')}\nAddress = 10.66.0.2/32\n\n[Peer]\nPublicKey = ${srvK.pub.toString('base64')}\nEndpoint = 127.0.0.1:${udpPort}\nAllowedIPs = 10.66.0.0/24\n` };
+      const evs = [];
+      const vm = new VpnManager({ binPath: WGBIN, emit: (c, p) => evs.push(p) });
+      try {
+        const vdir = fs.mkdtempSync(path.join(os.tmpdir(), 'kst-vpn-'));
+        const vv = new Vault(vdir); vv.create('Vpn-Test-Pass');
+        vv.data.vpns = [profile];
+        vv.data.hosts.push({ id: 'hv', label: 'Derrière VPN', hostname: '10.66.0.1', port: 22, username: U, auth: 'password', password: PW, group: 'Privé', vpnId: '' });
+        vv.data.groupVpns = { 'Privé': 'vpn1' };
+        const m2 = new SshManager({ vault: vv, emit: () => {}, askHostKey: async () => true,
+          vpnSocket: async (host, h, port) => { const id = host.vpnId === 'none' ? null : host.vpnId || vv.data.groupVpns[host.group]; const p = id && vv.data.vpns.find(x => x.id === id); return p ? vm.connect(p, h, port) : null; } });
+        const conn = await m2.connect('hv');
+        const outp = await new Promise((res, rej) => conn.exec('echo VIA-WIREGUARD-$((40+2))', (e, st) => { if (e) return rej(e); let o = ''; st.on('data', d => o += d).on('close', () => res(o)); }));
+        assert.ok(outp.includes('VIA-WIREGUARD-42'), outp);
+        conn.end();
+        const st = vm.status('vpn1');
+        assert.ok(['connected', 'up'].includes(st.state), JSON.stringify(st));
+        await sleep(2500);
+        assert.strictEqual(vm.status('vpn1').state, 'connected', 'handshake WireGuard vu');
+        assert.ok(vm.status('vpn1').rx > 0);
+        // Sans VPN (host forcé à « aucun ») : 10.66.0.1 n'existe pas
+        vv.data.hosts[0].vpnId = 'none';
+        await assert.rejects(Promise.race([m2.connect('hv'), sleep(6000).then(() => { throw new Error('timeout attendu'); })]));
+        // Mauvaise destination dans le tunnel → message clair
+        vv.data.hosts[0].vpnId = 'vpn1'; vv.data.hosts[0].hostname = '10.66.0.99';
+        await assert.rejects(m2.connect('hv'), /injoignable dans le tunnel|ne répond pas/);
+        vm.stop('vpn1');
+        await sleep(300);
+        assert.strictEqual(vm.status('vpn1').state, 'stopped');
+      } finally { vm.stopAll(); peer.kill(); }
+    });
+    await test('VPN : mauvaise clé du serveur → pas de handshake, erreur claire', async () => {
+      const cli = wgKey(), wrong = wgKey();
+      const vm = new VpnManager({ binPath: WGBIN });
+      const profile = { id: 'v2', name: 'VPN faux', config: `[Interface]\nPrivateKey = ${cli.priv.toString('base64')}\nAddress = 10.67.0.2/32\n[Peer]\nPublicKey = ${wrong.pub.toString('base64')}\nEndpoint = 127.0.0.1:9\nAllowedIPs = 10.67.0.0/24\n` };
+      try {
+        const t0 = Date.now();
+        await assert.rejects(vm.connect(profile, '10.67.0.1', 22), /ne répond pas|injoignable/);
+        assert.ok(Date.now() - t0 < 30000);
+        assert.notStrictEqual(vm.status('v2').state, 'connected');
+      } finally { vm.stopAll(); }
+    });
+  } else console.log('  (tests VPN de bout en bout ignorés : binaires kst-wg absents)');
 
   console.log('Sauvegarde / restauration');
   await test('export complet (coffre + historique) puis restauration sur un autre PC', async () => {

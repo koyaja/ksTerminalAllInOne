@@ -15,6 +15,7 @@ const { parsePrivateKey } = require('./keys');
 const { LockController } = require('./lock');
 const { Hello } = require('./hello');
 const { Updater } = require('./updater');
+const { VpnManager, parseWgConf, describeConf, defaultBinPath } = require('./vpn');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -68,6 +69,10 @@ const manager = new SshManager({
     else resolve(null);
     setTimeout(() => { if (pendingPrompts.has(reqId)) { pendingPrompts.delete(reqId); resolve(null); if (win && !win.isDestroyed()) win.webContents.send('ssh:promptCancel', { reqId }); } }, 5 * 60 * 1000);
   }),
+  vpnSocket: async (host, h, port) => {
+    const p = vpnProfileFor(host);
+    return p ? vpnMgr.connect(p, h, port) : null;
+  },
   askHostKey: (info) => new Promise(resolve => {
     const reqId = crypto.randomUUID();
     pendingHostKeys.set(reqId, resolve);
@@ -75,6 +80,22 @@ const manager = new SshManager({
     else resolve(false);
   })
 });
+
+// ----- VPN WireGuard intégrés -----
+const vpnMgr = new VpnManager({
+  binPath: defaultBinPath({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot: path.join(__dirname, '..', '..') }),
+  emit: (c, p) => { if (win && !win.isDestroyed()) win.webContents.send(c, p); }
+});
+// VPN effectif d'un host : le sien, sinon celui de son groupe ; 'none' = aucun.
+function vpnProfileFor(host) {
+  const d = vault.data;
+  if (!d) return null;
+  const id = host.vpnId === 'none' ? null : host.vpnId || ((d.groupVpns || {})[host.group || ''] || null);
+  if (!id) return null;
+  const p = (d.vpns || []).find(v => v.id === id);
+  if (!p) throw new Error(`Le VPN associé à « ${host.label} » n'existe plus`);
+  return p;
+}
 
 const localMgr = new LocalManager((channel, payload) => { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); });
 
@@ -96,7 +117,9 @@ function publicState() {
     knownHosts: d.knownHosts,
     settings: d.settings,
     workspaces: d.workspaces || [],
-    tunnels: manager.tunnelStatus()
+    tunnels: manager.tunnelStatus(),
+    vpns: (d.vpns || []).map(({ config, ...v }) => { let info = null; try { info = describeConf(config); } catch (e) { info = { error: e.message }; } return { ...v, info, status: vpnMgr.status(v.id) }; }),
+    groupVpns: d.groupVpns || {}
   };
 }
 
@@ -124,7 +147,7 @@ handle('vault:unlock', (pw) => {
   return afterUnlock();
 });
 // Verrouillage complet : ferme tout et efface la clé de la mémoire.
-handle('vault:lock', () => { manager.closeAll(); localMgr.killAll(); vault.lock(); lock.unlock(); return true; });
+handle('vault:lock', () => { manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock(); lock.unlock(); return true; });
 // Verrouillage d'écran : les sessions continuent.
 handle('lock:screen', () => { if (!vault.isUnlocked()) return false; return lock.lock('manuel'); });
 handle('vault:unlockScreen', (pw) => {
@@ -179,7 +202,7 @@ handle('vault:restorePick', async () => {
 handle('vault:restore', (pw) => {
   if (!pendingRestore) throw new Error('Choisis d\'abord le fichier de sauvegarde');
   lock.checkThrottle();
-  manager.closeAll(); localMgr.killAll();
+  manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll();
   let summary;
   try { summary = vault.restoreFrom(pendingRestore, pw); } catch (e) { if (/Mot de passe/.test(e.message)) lock.fail(); throw e; }
   pendingRestore = null;
@@ -190,6 +213,53 @@ handle('state:get', () => publicState());
 handle('settings:save', (s) => {
   const d = requireUnlocked(); d.settings = { ...d.settings, ...s }; vault.save(); applyLockSettings();
   if ('autoUpdate' in s) fs.writeFileSync(updPrefsFile, JSON.stringify({ autoUpdate: s.autoUpdate !== false }));
+  return publicState();
+});
+
+// ----- VPN -----
+handle('vpn:save', (input) => {
+  const d = requireUnlocked();
+  d.vpns = d.vpns || [];
+  const existing = input.id ? d.vpns.find(v => v.id === input.id) : null;
+  const name = String(input.name || '').trim();
+  if (!name) throw new Error('Nom du VPN obligatoire');
+  const config = typeof input.config === 'string' && input.config.trim() ? input.config : existing && existing.config;
+  if (!config) throw new Error('Colle ou importe le fichier .conf WireGuard');
+  parseWgConf(config); // valide avant d'enregistrer
+  const v = { id: existing ? existing.id : uid(), name, config, notes: input.notes || '' };
+  if (existing) { Object.assign(existing, v); vpnMgr.stop(existing.id); } else d.vpns.push(v);
+  vault.save();
+  return publicState();
+});
+handle('vpn:delete', (id) => {
+  const d = requireUnlocked();
+  const users = d.hosts.filter(h => h.vpnId === id).map(h => h.label);
+  const groups = Object.entries(d.groupVpns || {}).filter(([, v]) => v === id).map(([g]) => 'groupe ' + (g || 'sans groupe'));
+  if (users.length || groups.length) throw new Error('VPN utilisé par : ' + [...users, ...groups].join(', '));
+  vpnMgr.stop(id);
+  d.vpns = (d.vpns || []).filter(v => v.id !== id);
+  vault.save();
+  return publicState();
+});
+handle('vpn:importFile', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Importer une configuration WireGuard', properties: ['openFile'], filters: [{ name: 'WireGuard', extensions: ['conf'] }, { name: 'Tous les fichiers', extensions: ['*'] }] });
+  if (r.canceled || !r.filePaths.length) return null;
+  const text = fs.readFileSync(r.filePaths[0], 'utf8');
+  parseWgConf(text);
+  return { name: path.basename(r.filePaths[0]).replace(/\.conf$/i, ''), config: text };
+});
+handle('vpn:start', async (id) => {
+  const p = (requireUnlocked().vpns || []).find(v => v.id === id);
+  if (!p) throw new Error('VPN introuvable');
+  await vpnMgr.start(p);
+  return vpnMgr.status(id);
+});
+handle('vpn:stop', (id) => { vpnMgr.stop(id); return true; });
+handle('vpn:setGroup', (group, vpnId) => {
+  const d = requireUnlocked();
+  d.groupVpns = d.groupVpns || {};
+  if (vpnId) d.groupVpns[group || ''] = vpnId; else delete d.groupVpns[group || ''];
+  vault.save();
   return publicState();
 });
 
@@ -209,6 +279,7 @@ handle('host:save', (input) => {
     keyId: input.auth === 'key' ? input.keyId || null : null,
     startupCommand: input.startupCommand || '',
     jumpHostId: input.jumpHostId || null,
+    vpnId: input.vpnId || '',
     color: input.color || '',
     notes: input.notes || '',
     password: existing ? existing.password : '',
@@ -650,7 +721,7 @@ handle('update:download', async () => updater.download());
 handle('update:install', () => {
   updater.apply({ relaunch: true });
   quittingForUpdate = true;
-  manager.closeAll(); localMgr.killAll(); vault.lock();
+  manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock();
   setTimeout(() => app.exit(0), 200);
   return true;
 });
@@ -682,7 +753,7 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 }
-app.on('window-all-closed', () => { manager.closeAll(); localMgr.killAll(); vault.lock(); app.quit(); });
+app.on('window-all-closed', () => { manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock(); app.quit(); });
 // Mise à jour prête mais pas appliquée : installée à la fermeture (sans relancer).
 app.on('will-quit', () => {
   if (quittingForUpdate || !updater.stageReady) return;

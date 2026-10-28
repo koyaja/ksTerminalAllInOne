@@ -440,7 +440,7 @@
     const el = $('#section');
     el.replaceChildren(({
       hosts: viewHosts, keychain: viewKeychain, snippets: viewSnippets,
-      forwards: viewForwards, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal
+      forwards: viewForwards, vpn: viewVpn, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal
     })[ui.section]());
   }
 
@@ -468,7 +468,7 @@
     for (const x of list) { const g = x.group || 'Sans groupe'; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(x); }
     const names = [...groups.keys()].sort((a, b) => a === 'Sans groupe' ? 1 : b === 'Sans groupe' ? -1 : a.localeCompare(b));
     return h('div', {}, head, names.map(g => [
-      h('div', { class: 'group-title', text: `${g} · ${groups.get(g).length}` }),
+      groupTitle(g, groups.get(g).length),
       h('div', { class: 'grid' }, groups.get(g).sort((a, b) => a.label.localeCompare(b.label)).map(hostCard))
     ]), !list.length ? h('div', { class: 'empty', text: 'Aucun résultat.' }) : null);
   }
@@ -488,6 +488,7 @@
         h('div', { style: { minWidth: 0, flex: 1 } },
           h('div', { class: 'card-title', text: x.label }),
           h('div', { class: 'card-sub', text: `${x.username}@${x.hostname}${x.port !== 22 ? ':' + x.port : ''}` }),
+          vpnBadge(x),
           x.jumpHostId && hostById(x.jumpHostId) ? h('div', { class: 'card-via', title: 'Connexion via un jump host', text: `↪ via ${jumpChain(x).join(' → ')}` }) : null)),
       h('div', { class: 'card-actions' },
         h('button', { class: 'btn primary sm', onclick: (e) => { e.stopPropagation(); openTerminal(x.id); } }, 'SSH'),
@@ -532,8 +533,17 @@
       keyId: h('select', {}, S.keys.length ? S.keys.map(k => h('option', { value: k.id, text: `${k.label} (${k.type})` })) : h('option', { value: '', text: 'Aucune clé — ajoute-en une dans Keychain' })),
       startup: h('input', { value: x.startupCommand || '', placeholder: 'ex. cd /var/www && ls' }),
       jump: h('select', {}, h('option', { value: '', text: 'Connexion directe' }),
-        S.hosts.filter(z => z.id !== x.id).sort((a, b) => a.label.localeCompare(b.label)).map(z => h('option', { value: z.id, text: `${z.label} (${z.username}@${z.hostname})` })))
+        S.hosts.filter(z => z.id !== x.id).sort((a, b) => a.label.localeCompare(b.label)).map(z => h('option', { value: z.id, text: `${z.label} (${z.username}@${z.hostname})` }))),
+      vpn: h('select', {}, h('option', { value: '', text: 'Comme le groupe' }), h('option', { value: 'none', text: 'Aucun VPN' }),
+        (S.vpns || []).map(v => h('option', { value: v.id, text: '🌐 ' + v.name })))
     };
+    f.vpn.value = x.vpnId && (x.vpnId === 'none' || (S.vpns || []).some(v => v.id === x.vpnId)) ? x.vpnId : '';
+    const vpnHint = () => {
+      const gv = (S.groupVpns || {})[f.group.value.trim()];
+      const gName = gv && (S.vpns || []).find(v => v.id === gv);
+      f.vpn.options[0].text = gName ? `Comme le groupe (🌐 ${gName.name})` : 'Comme le groupe (aucun VPN)';
+    };
+    f.group.addEventListener('input', vpnHint); vpnHint();
     f.auth.value = x.auth || 'password';
     f.jump.value = x.jumpHostId && S.hosts.some(z => z.id === x.jumpHostId) ? x.jumpHostId : '';
     if (x.keyId) f.keyId.value = x.keyId;
@@ -567,6 +577,7 @@
         field('Utilisateur', f.username),
         field('Authentification', f.auth), keyWrap, pwWrap, clearWrap,
         sudoWrap, clearSudoWrap,
+        field('VPN WireGuard', f.vpn, 'Démarré automatiquement à la connexion. Avec un jump host, c\'est le VPN du bastion qui compte.'),
         field('Passer par (jump host / bastion)', f.jump, 'La connexion passe d\'abord par ce serveur, qui peut lui-même passer par un autre (plusieurs rebonds).'),
         field('Commande au démarrage', f.startup),
         field('Couleur', swatches)],
@@ -577,7 +588,7 @@
             port: f.port.value, username: f.username.value, auth: f.auth.value, keyId: f.keyId.value,
             password: f.password.value, clearPassword: f.clear.checked,
             sudoPassword: f.sudoPassword.value, clearSudoPassword: f.clearSudo.checked, startupCommand: f.startup.value, color,
-            jumpHostId: f.jump.value || null
+            jumpHostId: f.jump.value || null, vpnId: f.vpn.value
           }));
           if (!s) return false;
           setState(s); return true;
@@ -805,6 +816,114 @@
   }
 
   // ---------- Known hosts ----------
+  // ---------- VPN WireGuard ----------
+  function vpnById(id) { return (S.vpns || []).find(v => v.id === id); }
+  function effectiveVpn(x) {
+    if (x.vpnId === 'none') return null;
+    return vpnById(x.vpnId || (S.groupVpns || {})[x.group || ''] || '') || null;
+  }
+  function vpnState(v) { return (v && v.status && v.status.state) || 'stopped'; }
+  const VPN_LABEL = { stopped: 'Arrêté', starting: 'Démarrage…', up: 'Actif — en attente du serveur', connected: 'Connecté', error: 'Erreur' };
+  const VPN_DOT = { stopped: 'stop', starting: 'wait', up: 'wait', connected: 'on', error: 'err' };
+  function vpnBadge(x) {
+    const v = effectiveVpn(x);
+    if (!v) return null;
+    const inherited = !x.vpnId;
+    return h('div', { class: 'card-vpn', title: `VPN ${v.name} — ${VPN_LABEL[vpnState(v)]}${inherited ? ' (via le groupe)' : ''}` },
+      h('span', { class: 'dot ' + VPN_DOT[vpnState(v)] }), `🌐 ${v.name}${inherited ? ' · groupe' : ''}`);
+  }
+  function groupTitle(g, count) {
+    const key = g === 'Sans groupe' ? '' : g;
+    const v = vpnById((S.groupVpns || {})[key]);
+    const btn = h('button', { class: 'group-vpn' + (v ? ' on' : ''), title: 'VPN du groupe : toutes ses connexions passent par ce VPN',
+      onclick: (e) => popupMenu(e.currentTarget, [
+        ...(S.vpns || []).map(p => ({ label: (v && v.id === p.id ? '✓ ' : '') + '🌐 ' + p.name, sub: (p.info && p.info.endpoints || []).join(', '), onClick: () => setGroupVpn(key, p.id) })),
+        { label: v ? '✕ Retirer le VPN du groupe' : 'Aucun VPN', onClick: () => setGroupVpn(key, '') },
+        { label: '+ Nouveau VPN…', onClick: () => editVpn() }
+      ]) }, v ? `🌐 ${v.name}` : '🌐 VPN');
+    return h('div', { class: 'group-title group-row' }, h('span', { text: `${g} · ${count}` }), btn);
+  }
+  async function setGroupVpn(group, id) {
+    const s = await guard(() => api.invoke('vpn:setGroup', group, id));
+    if (s) { setState(s); toast(id ? `Groupe « ${group || 'Sans groupe'} » → ${vpnById(id).name}` : 'VPN retiré du groupe'); }
+  }
+  function fmtBytes(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' Mo' : n > 1024 ? (n / 1024).toFixed(0) + ' Ko' : (n || 0) + ' o'; }
+  function vpnStatusText(st) {
+    if (!st || st.state === 'stopped') return 'Arrêté';
+    if (st.state === 'error') return 'Erreur : ' + (st.error || '?');
+    if (st.state === 'starting') return 'Démarrage…';
+    const ago = st.handshake ? Math.max(0, Math.round(Date.now() / 1000 - st.handshake)) : null;
+    return (st.state === 'connected' ? 'Connecté' : 'Actif — en attente du serveur') +
+      (ago !== null ? ` · handshake il y a ${ago < 90 ? ago + ' s' : Math.round(ago / 60) + ' min'}` : '') + ` · ↓ ${fmtBytes(st.rx)} ↑ ${fmtBytes(st.tx)}`;
+  }
+  function vpnUsers(v) {
+    const hostsUsing = S.hosts.filter(x => effectiveVpn(x) && effectiveVpn(x).id === v.id);
+    const groupsUsing = Object.entries(S.groupVpns || {}).filter(([, id]) => id === v.id).map(([g]) => g || 'Sans groupe');
+    return { hostsUsing, groupsUsing };
+  }
+  function viewVpn() {
+    const list = S.vpns || [];
+    const head = h('div', { class: 'section-head' }, h('h1', { text: 'VPN WireGuard' }),
+      h('button', { class: 'btn primary', onclick: () => editVpn() }, '+ Nouveau VPN'));
+    const intro = h('p', { class: 'muted small', style: { maxWidth: '760px' },
+      text: 'Associe un VPN à un host (formulaire du host) ou à tout un groupe (bouton 🌐 à côté du nom du groupe). Il démarre tout seul à la connexion. Le tunnel tourne dans KSTermus : pas de droits administrateur, pas de changement réseau sur le PC, seules les connexions SSH / SFTP / tunnels de ces hosts l\'empruntent.' });
+    if (!list.length) return h('div', {}, head, intro, h('div', { class: 'empty' }, h('div', { text: 'Aucun VPN. Importe le fichier .conf fourni par ton administrateur.' }), h('button', { class: 'btn primary', onclick: () => editVpn() }, 'Ajouter un VPN')));
+    return h('div', {}, head, intro, h('div', { class: 'list' }, list.map(v => {
+      const st = v.status || { state: 'stopped' };
+      const running = ['starting', 'up', 'connected'].includes(st.state);
+      const { hostsUsing, groupsUsing } = vpnUsers(v);
+      return h('div', { class: 'row vpn-row', 'data-vpn': v.id },
+        h('span', { class: 'dot ' + VPN_DOT[st.state] }),
+        h('div', { class: 'row-main' },
+          h('div', { class: 'row-title', text: v.name }),
+          h('div', { class: 'muted small mono', text: v.info && v.info.error ? '⚠ ' + v.info.error : `${(v.info.endpoints || []).join(', ')} · ${(v.info.addresses || []).join(', ')} · routes ${(v.info.allowedIPs || []).join(', ')}` }),
+          h('div', { class: 'small vpn-status', text: vpnStatusText(st) }),
+          h('div', { class: 'muted small', text: (groupsUsing.length ? 'Groupes : ' + groupsUsing.join(', ') + ' · ' : '') + `${hostsUsing.length} host(s) : ` + (hostsUsing.map(x => x.label).join(', ') || '—') })),
+        h('button', { class: 'btn sm' + (running ? '' : ' primary'), onclick: async (e) => {
+          const b = e.currentTarget; b.disabled = true;
+          if (running) await guard(() => api.invoke('vpn:stop', v.id));
+          else { b.textContent = 'Démarrage…'; const r = await guard(() => api.invoke('vpn:start', v.id)); if (r) toast(`VPN ${v.name} démarré`); }
+          refresh();
+        } }, running ? 'Arrêter' : 'Démarrer'),
+        h('button', { class: 'icon-btn', title: 'Modifier', onclick: () => editVpn(v) }, '✎'),
+        h('button', { class: 'icon-btn', title: 'Supprimer', onclick: async () => {
+          if (await confirmBox('Supprimer le VPN', `Supprimer « ${v.name} » ?`)) { const s = await guard(() => api.invoke('vpn:delete', v.id)); if (s) setState(s); }
+        } }, '🗑'));
+    })));
+  }
+  function editVpn(v = {}) {
+    const name = h('input', { value: v.name || '', placeholder: 'VPN Bienvenu, VPN QOS…' });
+    const conf = h('textarea', { rows: 11, spellcheck: 'false', class: 'mono', placeholder: v.id ? 'Laisser vide pour garder la configuration actuelle (la clé privée n\'est jamais réaffichée).' : '[Interface]\nPrivateKey = …\nAddress = 10.8.0.2/32\nDNS = 10.8.0.1\n\n[Peer]\nPublicKey = …\nEndpoint = vpn.exemple.com:51820\nAllowedIPs = 10.8.0.0/24\nPersistentKeepalive = 25' });
+    const notes = h('input', { value: v.notes || '', placeholder: 'Optionnel' });
+    const importBtn = h('button', { class: 'btn sm', type: 'button', onclick: async () => {
+      const r = await guard(() => api.invoke('vpn:importFile'));
+      if (r) { conf.value = r.config; if (!name.value) name.value = r.name; }
+    } }, '📂 Importer un fichier .conf');
+    return modal({
+      title: v.id ? 'Modifier le VPN' : 'Nouveau VPN WireGuard', wide: true,
+      body: [field('Nom', name), h('div', { class: 'field' }, h('span', { text: 'Configuration WireGuard (.conf)' }), conf, h('div', { style: { marginTop: '6px' } }, importBtn)),
+        h('p', { class: 'muted small', text: 'Format standard wg-quick (fourni par le serveur WireGuard, pfSense, OPNsense, Firezone…). Stocké chiffré dans le coffre. AllowedIPs indique quels réseaux passent par le VPN.' }),
+        field('Notes', notes)],
+      actions: [{ label: 'Annuler', value: false }, { label: 'Enregistrer', class: 'primary', submit: true, onClick: async () => {
+        const s = await guard(() => api.invoke('vpn:save', { id: v.id || null, name: name.value, config: conf.value, notes: notes.value }));
+        if (!s) return false; setState(s); return true;
+      } }]
+    });
+  }
+  api.on('vpn:status', (st) => {
+    if (!S || !S.vpns) return;
+    const v = S.vpns.find(x => x.id === st.id);
+    if (!v) return;
+    const prev = vpnState(v);
+    v.status = st;
+    if (ui.activeTab !== 'home') return;
+    if (ui.section === 'vpn') {
+      const row = document.querySelector(`.vpn-row[data-vpn="${st.id}"]`);
+      if (prev !== st.state || !row) renderSection();
+      else row.querySelector('.vpn-status').textContent = vpnStatusText(st);
+    } else if (ui.section === 'hosts' && prev !== st.state && !document.activeElement.matches('.search')) renderSection();
+  });
+
   function viewKnown() {
     const entries = Object.entries(S.knownHosts || {});
     return h('div', {},

@@ -1,7 +1,7 @@
 {
   "name": "kstermus",
   "productName": "KSTermus",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Client SSH / SFTP avec keychain chiffré, snippets et port forwarding",
   "author": "CYBERISK",
   "license": "UNLICENSED",
@@ -49,7 +49,13 @@
         "portable"
       ],
       "icon": "assets/icon.ico",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "extraResources": [
+        {
+          "from": "native/kst-wg/kst-wg-win32-x64.exe",
+          "to": "kst-wg/kst-wg-win32-x64.exe"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -84,7 +90,13 @@
           "StartupWMClass": "KSTermus",
           "Keywords": "ssh;sftp;terminal;"
         }
-      }
+      },
+      "extraResources": [
+        {
+          "from": "native/kst-wg/kst-wg-linux-x64",
+          "to": "kst-wg/kst-wg-linux-x64"
+        }
+      ]
     },
     "appImage": {
       "artifactName": "KSTermus-${version}-x86_64.${ext}"

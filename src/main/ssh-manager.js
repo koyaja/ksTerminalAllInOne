@@ -95,6 +95,13 @@ class SshManager {
       }
     }
 
+    // VPN WireGuard associé au host (ou à son groupe) : seul le premier saut direct
+    // passe par le tunnel ; les rebonds suivants voyagent dans la connexion du bastion.
+    if (!jumpConn && this.bridge.vpnSocket) {
+      const sock = await this.bridge.vpnSocket(host, cfg.host, cfg.port);
+      if (sock) cfg.sock = sock;
+    }
+
     return new Promise((resolve, reject) => {
       const conn = new Client();
       let settled = false;

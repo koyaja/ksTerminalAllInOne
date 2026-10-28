@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.6.0** · Windows et **Linux**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.7.0** · Windows et **Linux**
 
 ---
 
@@ -22,6 +22,7 @@
    - [Historique des éditions](#historique-des-éditions)
    - [Keychain et mots de passe](#keychain-et-mots-de-passe)
    - [Port forwarding](#port-forwarding)
+   - [VPN WireGuard](#vpn-wireguard)
    - [Known hosts](#known-hosts)
    - [Verrouillage et Windows Hello](#verrouillage-et-windows-hello)
    - [Recherche dans le terminal](#recherche-dans-le-terminal)
@@ -60,6 +61,7 @@
 | **Historique** | Chaque ouverture et chaque enregistrement crée une version **chiffrée** ; différences et restauration en un clic |
 | **Mots de passe** | Boutons **afficher / masquer** et **copier** partout ; presse-papiers effacé automatiquement après 30 s |
 | **Keychain** | Import OpenSSH / PEM / PuTTY `.ppk`, génération ed25519 / RSA 4096, export, copie de la clé publique |
+| **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
 | **Sécurité** | Coffre AES-256-GCM + scrypt, vérification des empreintes serveur (TOFU), alerte bloquante si une empreinte change |
 | **Fenêtre** | Barre de titre intégrée, taille/position mémorisées, instance unique, confirmation à la fermeture, plein écran |
@@ -236,6 +238,22 @@ Fonctionnement :
 
 Un tunnel coupé (et non arrêté par toi) est **relancé automatiquement** (2, 4, 8, 15 puis 30 s, 20 tentatives au maximum). Tu peux désactiver ce comportement tunnel par tunnel.
 
+### VPN WireGuard
+
+Pour les serveurs joignables uniquement par VPN.
+
+1. **VPN ▸ + Nouveau VPN** : nom + configuration WireGuard (bouton **📂 Importer un fichier .conf** ou copier-coller, format `wg-quick` standard).
+2. Associer :
+   - **à tout un groupe** : bouton **🌐 VPN** à droite du nom du groupe dans *Hosts* ;
+   - **à un host** : champ **VPN WireGuard** du formulaire (*Comme le groupe* / *Aucun VPN* / un profil).
+3. Se connecter normalement : le VPN démarre tout seul (SSH, SFTP, éditeur, port forwarding). La page **VPN** montre l'état (*Connecté*, dernier handshake, octets ↓↑) et permet **Démarrer / Arrêter**.
+
+Fonctionnement : chaque VPN démarré lance `kst-wg` (wireguard-go officiel + pile TCP/IP *netstack* de gVisor) **dans KSTermus**. Pas d'interface réseau système, pas de droits administrateur, pas de route modifiée sur le PC : seules les connexions des hosts associés passent par le tunnel, et plusieurs VPN peuvent tourner en même temps. La clé privée reste dans le coffre chiffré et est transmise au moteur par un canal interne, jamais écrite sur disque ; le proxy local du tunnel n'accepte que KSTermus (identifiant aléatoire). Les VPN s'arrêtent au verrouillage complet et à la fermeture.
+
+- `DNS =` du `.conf` sert à résoudre les noms internes ; sans DNS, les noms sont résolus par le PC.
+- Avec un jump host, c'est le VPN du **bastion** (premier saut) qui est utilisé.
+- *« injoignable dans le tunnel »* : serveur éteint, adresse hors des `AllowedIPs`, ou pas de handshake (Endpoint ou clés incorrects). Le statut *« en attente du serveur »* signifie qu'aucun handshake n'a encore abouti.
+
 ### Known hosts
 
 La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la connexion est **bloquée**, avec l'ancienne et la nouvelle empreinte affichées : il peut s'agir d'une réinstallation ou d'une attaque de type *man-in-the-middle*. **Oublier** permet de réaccepter après vérification.
@@ -371,6 +389,7 @@ src/
 │   ├── remote-editor.js       Lecture / écriture de fichiers distants (SFTP ou sudo), conflits
 │   ├── local-pty.js           Terminaux locaux (ConPTY), détection des shells, sessions détachables
 │   ├── lock.js                Verrouillage d'écran : inactivité, filtrage IPC, anti force brute
+│   ├── vpn.js                 VPN WireGuard : lecture .conf, processus kst-wg, SOCKS5 authentifié
 │   ├── updater.js             Mises à jour GitHub Releases : manifeste signé, téléchargement, remplacement
 │   ├── hello.js               Windows Hello (WinRT via PowerShell) + clé DPAPI au démarrage
 │   ├── keys.js                Validation des clés privées, empreintes
@@ -384,6 +403,7 @@ build/
 ├── make-icon.py               Génération de l'icône (PNG + ICO multi-tailles)
 └── after-pack.js              Injection de l'icône et des infos de version dans le .exe
 assets/                        icon.png, icon.ico, icon-1024.png
+native/kst-wg/                 Moteur WireGuard (Go : wireguard-go + netstack) — build.sh, binaires Linux/Windows
 scripts/make-release.js        Prépare et signe une release
 test/run-tests.js              Tests d'intégration
 ```
@@ -406,7 +426,7 @@ KST_HOST=127.0.0.1 KST_PORT=2222 KST_USER=kst KST_PASS='…' \
 KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 ```
 
-48 tests couvrent :
+51 tests couvrent :
 - **le coffre** : chiffrement, mauvais mot de passe, changement de mot de passe ;
 - **SSH** : TOFU, empreinte modifiée, authentification par mot de passe et par clé avec passphrase, shell interactif ;
 - **SFTP** : envoi, téléchargement, renommage, suppression récursive ;
@@ -417,6 +437,7 @@ KST_AUTH_KEYS=/home/kst/.ssh/authorized_keys npm test
 - **la reconnexion** : `exit` = fin propre, coupure TCP = reconnexion ;
 - **les terminaux locaux** : lancement, détacher avec mise en tampon, rattacher, terminer ;
 - **le verrouillage** : délai d'inactivité, IPC bloqués sauf déverrouillage, anti force brute, vérification du mot de passe, ouverture par clé ;
+- **le VPN WireGuard** : lecture des `.conf`, SSH de bout en bout à travers un vrai tunnel WireGuard vers un serveur joignable seulement dans le VPN, mauvaise clé serveur, destination hors tunnel ;
 - **les mises à jour** (faux serveur GitHub) : détection, téléchargement, SHA-256, signature falsifiée ou d'une autre clé, archive modifiée ou trop grande, pas de retour arrière de version, extraction et remplacement Windows ;
 - **Windows Hello** (simulé hors Windows) : disponibilité, vérification, annulation, Hello non configuré, clé du coffre jamais stockée en clair.
 
@@ -478,6 +499,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.7.0** | **VPN WireGuard intégré** : profils `.conf`, association à un host ou à un groupe, démarrage automatique à la connexion, page VPN (état, handshake, trafic, démarrer / arrêter), sans droits administrateur |
 | **1.6.0** | **Restauration d'une sauvegarde** depuis l'écran de verrouillage ou les Paramètres (Windows ↔ Linux), export complet coffre + historique, ancien coffre conservé, anciens exports acceptés |
 | **1.5.1** | **Version Linux** (AppImage, .deb, .tar.gz) ; sous Linux, mise à jour notifiée avec lien vers la release au lieu de télécharger le zip Windows |
 | **1.5.0** | Mises à jour automatiques depuis GitHub Releases (manifeste signé Ed25519, SHA-256, téléchargement en arrière-plan, redémarrer ou installer à la fermeture), script de release signée |

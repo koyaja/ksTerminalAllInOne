@@ -11,3 +11,5 @@ INIT-GIT.cmd
 kstermus.bundle
 *.pem
 signing/
+native/kst-wg/go.offline.mod
+native/kst-wg/go.offline.sum
