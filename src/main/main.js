@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen, powerMonitor, safeStorage, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen, powerMonitor, safeStorage, net, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -20,6 +20,7 @@ const { AuditLog, Recorder, newLogKey } = require('./audit');
 const { SftpJobs } = require('./sftp-jobs');
 const { SyncEngine } = require('./sync');
 const gdrive = require('./gdrive');
+const { Monitor } = require('./monitor');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -226,6 +227,7 @@ function handle(channel, fn) {
       const value = await fn(...args);
       try { auditHook(channel, args, value, null); } catch { /* le journal ne doit jamais casser l'action */ }
       if (SYNC_TRIGGERS.has(channel)) scheduleSync(8000);
+      if (channel === 'host:save' && monitor.timer) setTimeout(() => monitor.tick(), 500);
       return { ok: true, value };
     } catch (err) {
       try { auditHook(channel, args, null, err); } catch { /* ignore */ }
@@ -241,7 +243,7 @@ handle('vault:status', () => ({
   helloScreen: vault.isUnlocked() && !!(vault.data.settings || {}).helloScreen,
   version: app.getVersion()
 }));
-function afterUnlock() { lock.unlock(); applyLockSettings(); try { purgeOld(); } catch { /* ignore */ } scheduleSync(1500); return publicState(); }
+function afterUnlock() { lock.unlock(); applyLockSettings(); try { purgeOld(); } catch { /* ignore */ } scheduleSync(1500); if (!monitor.timer) setTimeout(() => { if (vault.isUnlocked()) monitor.start(); }, 2000); return publicState(); }
 handle('vault:create', (pw) => { vault.create(pw); return afterUnlock(); });
 handle('vault:unlock', (pw) => {
   lock.checkThrottle();
@@ -252,7 +254,7 @@ handle('vault:unlock', (pw) => {
 handle('vault:lock', () => {
   audit.log('lock', { method: 'coffre (tout fermé)' });
   for (const sid of [...sessionInfo.keys()]) sessionEnded(sid, 'coffre verrouillé');
-  manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); recorder.stopAll(); vault.lock(); lock.unlock(); return true;
+  monitor.stop(); manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); recorder.stopAll(); vault.lock(); lock.unlock(); return true;
 });
 // Verrouillage d'écran : les sessions continuent.
 handle('lock:screen', () => { if (!vault.isUnlocked()) return false; return lock.lock('manuel'); });
@@ -319,7 +321,32 @@ handle('state:get', () => publicState());
 handle('settings:save', (s) => {
   const d = requireUnlocked(); d.settings = { ...d.settings, ...s }; vault.save(); applyLockSettings();
   if ('autoUpdate' in s) fs.writeFileSync(updPrefsFile, JSON.stringify({ autoUpdate: s.autoUpdate !== false }));
+  if ('monitorInterval' in s) monitor.restart();
   return publicState();
+});
+
+// ----- Tableau de bord : surveillance des serveurs -----
+const monitor = new Monitor({
+  manager,
+  getHosts: () => (vault.isUnlocked() ? vault.data.hosts : []),
+  getSettings: () => appSettings(),
+  emit: (c, p) => { if (win && !win.isDestroyed()) win.webContents.send(c, p); },
+  notify: (a) => {
+    if (win && !win.isDestroyed()) win.webContents.send('monitor:alert', a);
+    if (a.state === 'new') audit.log('settings', { action: 'alerte serveur', host: a.host, reason: a.msg });
+    if (appSettings().monitorNotify === false || !Notification.isSupported()) return;
+    const n = new Notification({ title: (a.state === 'new' ? (a.level === 'crit' ? '🔴 ' : '🟠 ') : '✅ ') + a.host, body: (a.state === 'new' ? '' : 'Rétabli : ') + a.msg, silent: a.state !== 'new' });
+    n.on('click', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); win.webContents.send('monitor:focus', a.hostId); } });
+    n.show();
+  }
+});
+handle('monitor:snapshot', () => monitor.snapshot());
+handle('monitor:refresh', async (hostId) => {
+  const h = requireUnlocked().hosts.find(x => x.id === hostId);
+  if (!h) throw new Error('Host introuvable');
+  const st = monitor.state.get(hostId); if (st) monitor.dropConn(st);
+  await monitor.measure(h);
+  return monitor.snapshot()[hostId];
 });
 
 // ----- Synchronisation chiffrée entre PC -----
@@ -479,6 +506,8 @@ handle('host:save', (input) => {
     vpnId: input.vpnId || '',
     updatedAt: new Date().toISOString(),
     env: ['dev', 'staging', 'prod'].includes(input.env) ? input.env : '',
+    monitor: !!input.monitor,
+    monitorServices: String(input.monitorServices || '').split(/[\s,;]+/).filter(x => /^[\w@.:-]{1,64}$/.test(x)).join(', '),
     record: !!input.record,
     color: input.color || '',
     notes: input.notes || '',
@@ -1027,7 +1056,7 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 }
-app.on('window-all-closed', () => { manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock(); app.quit(); });
+app.on('window-all-closed', () => { monitor.stop(); manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock(); app.quit(); });
 // Mise à jour prête mais pas appliquée : installée à la fermeture (sans relancer).
 app.on('will-quit', () => {
   if (quittingForUpdate || !updater.stageReady) return;

@@ -242,6 +242,7 @@
 
   function showApp() {
     $('#lock').hidden = true; $('#app').hidden = false; activateTab('home');
+    loadMonSnapshot();
     api.invoke('local:shells').then(list => { ui.shells = list || []; if (ui.section === 'local') renderSection(); }).catch(() => {});
   }
 
@@ -446,7 +447,7 @@
     const el = $('#section');
     el.replaceChildren(({
       hosts: viewHosts, keychain: viewKeychain, snippets: viewSnippets,
-      forwards: viewForwards, vpn: viewVpn, audit: viewAudit, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal
+      forwards: viewForwards, vpn: viewVpn, audit: viewAudit, dashboard: viewDashboard, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal
     })[ui.section]());
   }
 
@@ -499,7 +500,7 @@
         h('div', { style: { minWidth: 0, flex: 1 } },
           h('div', { class: 'card-title' }, h('span', { text: x.label }), envBadge(x.env), x.record ? h('span', { class: 'rec-badge', title: 'Sessions enregistrées' }, '●REC') : null),
           h('div', { class: 'card-sub', text: `${x.username}@${x.hostname}${x.port !== 22 ? ':' + x.port : ''}` }),
-          vpnBadge(x),
+          vpnBadge(x), monMini(x),
           x.jumpHostId && hostById(x.jumpHostId) ? h('div', { class: 'card-via', title: 'Connexion via un jump host', text: `↪ via ${jumpChain(x).join(' → ')}` }) : null)),
       h('div', { class: 'card-actions' },
         h('button', { class: 'btn primary sm', onclick: (e) => { e.stopPropagation(); openTerminal(x.id); } }, 'SSH'),
@@ -547,11 +548,15 @@
         S.hosts.filter(z => z.id !== x.id).sort((a, b) => a.label.localeCompare(b.label)).map(z => h('option', { value: z.id, text: `${z.label} (${z.username}@${z.hostname})` }))),
       env: h('select', {}, h('option', { value: '', text: '—' }), h('option', { value: 'dev', text: 'Développement' }), h('option', { value: 'staging', text: 'Recette / staging' }), h('option', { value: 'prod', text: '🔴 PRODUCTION' })),
       record: h('input', { type: 'checkbox' }),
+      monitor: h('input', { type: 'checkbox' }),
+      monitorServices: h('input', { placeholder: 'nginx, docker, mysql, php8.3-fpm…', spellcheck: 'false' }),
       vpn: h('select', {}, h('option', { value: '', text: 'Comme le groupe' }), h('option', { value: 'none', text: 'Aucun VPN' }),
         (S.vpns || []).map(v => h('option', { value: v.id, text: '🌐 ' + v.name })))
     };
     f.env.value = x.env || '';
     f.record.checked = !!x.record;
+    f.monitor.checked = !!x.monitor;
+    f.monitorServices.value = x.monitorServices || '';
     f.vpn.value = x.vpnId && (x.vpnId === 'none' || (S.vpns || []).some(v => v.id === x.vpnId)) ? x.vpnId : '';
     const vpnHint = () => {
       const gv = (S.groupVpns || {})[f.group.value.trim()];
@@ -594,6 +599,8 @@
         sudoWrap, clearSudoWrap,
         h('div', { class: 'form-row' }, field('Environnement', f.env, 'PROD : confirmation obligatoire avant toute commande dangereuse (rm -rf, DROP, reboot…).'),
           h('label', { class: 'check', style: { alignSelf: 'center', marginTop: '14px' } }, f.record, 'Enregistrer les sessions')),
+        h('div', { class: 'form-row' }, h('label', { class: 'check', style: { alignSelf: 'center', marginTop: '14px', whiteSpace: 'nowrap' } }, f.monitor, 'Surveiller (tableau de bord)'),
+          field('Services à surveiller', f.monitorServices)),
         field('VPN WireGuard', f.vpn, 'Démarré automatiquement à la connexion. Avec un jump host, c\'est le VPN du bastion qui compte.'),
         field('Passer par (jump host / bastion)', f.jump, 'La connexion passe d\'abord par ce serveur, qui peut lui-même passer par un autre (plusieurs rebonds).'),
         field('Commande au démarrage', f.startup),
@@ -605,7 +612,8 @@
             port: f.port.value, username: f.username.value, auth: f.auth.value, keyId: f.keyId.value,
             password: f.password.value, clearPassword: f.clear.checked,
             sudoPassword: f.sudoPassword.value, clearSudoPassword: f.clearSudo.checked, startupCommand: f.startup.value, color,
-            jumpHostId: f.jump.value || null, vpnId: f.vpn.value, env: f.env.value, record: f.record.checked
+            jumpHostId: f.jump.value || null, vpnId: f.vpn.value, env: f.env.value, record: f.record.checked,
+            monitor: f.monitor.checked, monitorServices: f.monitorServices.value
           }));
           if (!s) return false;
           setState(s); return true;
@@ -833,6 +841,145 @@
   }
 
   // ---------- Known hosts ----------
+  // ---------- Tableau de bord (surveillance) ----------
+  const MON = {};            // hostId -> { last, history[], alerts[] }
+  function fmtUptime(sec) { if (!sec) return '—'; const d = Math.floor(sec / 86400), hh = Math.floor(sec % 86400 / 3600), mm = Math.floor(sec % 3600 / 60); return d ? `${d} j ${hh} h` : hh ? `${hh} h ${mm} min` : `${mm} min`; }
+  const pctClass = (v, warn = 80, crit = 90) => v == null ? '' : v >= crit ? 'crit' : v >= warn ? 'warn' : 'ok';
+  function sparkline(values, { max = 100, w = 120, hgt = 28 } = {}) {
+    const vals = values.map(v => (v == null ? null : Math.max(0, Math.min(max, v))));
+    const n = vals.length;
+    if (n < 2) return h('svg', { class: 'spark', viewBox: `0 0 ${w} ${hgt}`, width: w, height: hgt });
+    const pts = vals.map((v, i) => v == null ? null : `${(i / (n - 1) * w).toFixed(1)},${(hgt - 2 - v / max * (hgt - 4)).toFixed(1)}`).filter(Boolean);
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${w} ${hgt}`); svg.setAttribute('width', w); svg.setAttribute('height', hgt); svg.setAttribute('class', 'spark');
+    const area = document.createElementNS(svg.namespaceURI, 'polygon');
+    area.setAttribute('points', `0,${hgt} ${pts.join(' ')} ${w},${hgt}`); area.setAttribute('class', 'spark-area');
+    const line = document.createElementNS(svg.namespaceURI, 'polyline');
+    line.setAttribute('points', pts.join(' ')); line.setAttribute('class', 'spark-line');
+    svg.append(area, line);
+    return svg;
+  }
+  function meter(label, value, extra) {
+    return h('div', { class: 'meter ' + pctClass(value) },
+      h('div', { class: 'meter-top' }, h('span', { text: label }), h('b', { text: value == null ? '—' : `${value} %` })),
+      h('div', { class: 'meter-bar' }, h('i', { style: { width: (value || 0) + '%' } })),
+      extra ? h('div', { class: 'meter-sub', text: extra }) : null);
+  }
+  function monMini(x) {
+    if (!x.monitor) return null;
+    const d = MON[x.id];
+    if (!d || !d.last) return h('div', { class: 'card-mon muted', text: '📊 surveillance…' });
+    const m = d.last;
+    if (!m.ok) return h('div', { class: 'card-mon crit', title: m.error, text: '📊 injoignable' });
+    return h('div', { class: 'card-mon' + (d.alerts && d.alerts.length ? ' warn' : '') },
+      `📊 CPU ${m.cpu ?? '—'}% · RAM ${m.mem ?? '—'}% · Disque ${m.disk ?? '—'}%`, d.alerts && d.alerts.length ? ` · ⚠ ${d.alerts.length}` : '');
+  }
+  function monTile(x) {
+    const d = MON[x.id] || {};
+    const m = d.last;
+    const hist = d.history || [];
+    const ago2 = m ? Math.round((Date.now() - m.at) / 1000) : null;
+    const state = !m ? 'wait' : !m.ok ? 'err' : (d.alerts || []).some(a => a.level === 'crit') ? 'err' : (d.alerts || []).length ? 'wait' : 'on';
+    const memExtra = m && m.memTotal ? `${fmtSize(m.memUsed)} / ${fmtSize(m.memTotal)}` : '';
+    const worst = m && m.disks && m.disks.length ? m.disks.reduce((a, b) => (b.pct > a.pct ? b : a)) : null;
+    const tile = h('div', { class: 'mon-tile st-' + state, 'data-host': x.id },
+      h('div', { class: 'mon-head' }, h('span', { class: 'dot ' + state }), h('span', { class: 'mon-name', text: x.label }), envBadge(x.env),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'icon-btn mini', title: 'Mesurer maintenant', onclick: async (e) => { e.stopPropagation(); e.currentTarget.disabled = true; const r = await guard(() => api.invoke('monitor:refresh', x.id)); if (r) { MON[x.id] = r; refreshMon(x.id); } } }, '⟳'),
+        h('button', { class: 'icon-btn mini', title: 'Terminal SSH', onclick: (e) => { e.stopPropagation(); openTerminal(x.id); } }, '>_')),
+      !m ? h('div', { class: 'muted small', text: 'Première mesure en cours…' })
+        : !m.ok ? h('div', { class: 'mon-err', text: '⛔ ' + m.error })
+          : [
+            h('div', { class: 'mon-sub muted small', text: `${m.os || m.kernel || ''} · en marche depuis ${fmtUptime(m.uptimeSec)}` }),
+            m.unsupported ? h('div', { class: 'muted small', text: m.unsupported }) : null,
+            h('div', { class: 'mon-cpu' }, meter('CPU', m.cpu, m.load ? `charge ${m.load.join(' · ')} — ${m.cpus || '?'} cœur(s)` : ''), sparkline(hist.map(p => p.cpu))),
+            h('div', { class: 'mon-cpu' }, meter('RAM', m.mem, memExtra + (m.swap ? ` · swap ${m.swap} %` : '')), sparkline(hist.map(p => p.mem))),
+            meter('Disque', m.disk, worst ? `${worst.mount} : ${fmtSize(worst.used)} / ${fmtSize(worst.size)}${m.disks.length > 1 ? ` (+${m.disks.length - 1} autre(s))` : ''}` : ''),
+            h('div', { class: 'mon-net muted small', text: `↓ ${fmtSize(m.rxRate || 0)}/s  ↑ ${fmtSize(m.txRate || 0)}/s` + (m.docker ? ` · 🐳 ${m.docker.running}/${m.docker.total} conteneurs` : '') }),
+            m.services && m.services.length ? h('div', { class: 'mon-svcs' }, m.services.map(s2 => h('span', { class: 'svc ' + (s2.ok ? 'ok' : 'ko'), title: s2.state, text: (s2.ok ? '● ' : '○ ') + s2.name }))) : null
+          ],
+      (d.alerts || []).length ? h('div', { class: 'mon-alerts' }, d.alerts.map(a => h('div', { class: 'al ' + a.level, text: (a.level === 'crit' ? '🔴 ' : '🟠 ') + a.msg }))) : null,
+      h('div', { class: 'mon-foot muted', text: m ? `mesuré il y a ${ago2 < 60 ? ago2 + ' s' : Math.round(ago2 / 60) + ' min'}` : '' }));
+    tile.addEventListener('click', () => monDetail(x));
+    return tile;
+  }
+  function monDetail(x) {
+    const d = MON[x.id] || {}; const m = d.last;
+    if (!m || !m.ok) return;
+    modal({
+      title: `📊 ${x.label}`, wide: true,
+      body: [
+        h('div', { class: 'muted small', text: `${m.hostname || ''} · ${m.os || ''} · ${m.kernel || ''}` }),
+        h('table', { class: 'audit', style: { marginTop: '10px' } },
+          h('thead', {}, h('tr', {}, h('th', { text: 'Montage' }), h('th', { text: 'Système de fichiers' }), h('th', { text: 'Utilisé' }), h('th', { text: 'Taille' }), h('th', { text: '%' }))),
+          h('tbody', {}, (m.disks || []).map(dk => h('tr', {}, h('td', { text: dk.mount }), h('td', { class: 'det', text: dk.fs }), h('td', { text: fmtSize(dk.used) }), h('td', { text: fmtSize(dk.size) }), h('td', { class: pctClass(dk.pct), text: dk.pct + ' %' }))))),
+        (m.services || []).length ? h('p', { class: 'small', text: 'Services : ' + m.services.map(s2 => `${s2.name} (${s2.state})`).join(', ') }) : null,
+        h('p', { class: 'muted small', text: 'Historique : ~2 h (une mesure par intervalle). Seuils d\'alerte : disque 90 %, RAM 90 %, charge > 2 × cœurs, service arrêté, serveur injoignable.' })
+      ],
+      actions: [{ label: 'Fermer', value: null }]
+    });
+  }
+  function refreshMon(hostId) {
+    if (ui.activeTab !== 'home') return;
+    const x = hostById(hostId); if (!x) return;
+    if (ui.section === 'dashboard') {
+      const old = document.querySelector(`.mon-tile[data-host="${hostId}"]`);
+      if (old) { old.replaceWith(monTile(x)); const sm = document.querySelector('.mon-summary'); if (sm) sm.replaceWith(monSummary(S.hosts.filter(y => y.monitor))); } else renderSection();
+    } else if (ui.section === 'hosts' && !document.activeElement.matches('.search')) {
+      const card = [...document.querySelectorAll('.card')].find(c => c.querySelector('.card-title span') && c.querySelector('.card-title span').textContent === x.label);
+      const mini = card && card.querySelector('.card-mon');
+      if (mini) mini.replaceWith(monMini(x));
+    }
+  }
+  function monSummary(watched) {
+    const total = watched.length;
+    const down = watched.filter(x => MON[x.id] && MON[x.id].last && !MON[x.id].last.ok).length;
+    const alerting = watched.filter(x => MON[x.id] && (MON[x.id].alerts || []).length).length;
+    return h('div', { class: 'mon-summary' },
+      total - alerting ? h('span', { class: 'sum ok', text: `${total - alerting} OK` }) : null, alerting - down ? h('span', { class: 'sum warn', text: `${alerting - down} en alerte` }) : null, down ? h('span', { class: 'sum crit', text: `${down} injoignable(s)` }) : null);
+  }
+  function viewDashboard() {
+    const watched = S.hosts.filter(x => x.monitor);
+    const intervalSel = h('select', { style: { width: 'auto' } }, [[30, 'toutes les 30 s'], [60, 'chaque minute'], [300, 'toutes les 5 min']].map(([v, l]) => h('option', { value: String(v), text: l })));
+    intervalSel.value = String(S.settings.monitorInterval || 60);
+    intervalSel.addEventListener('change', async () => { const st = await guard(() => api.invoke('settings:save', { monitorInterval: Number(intervalSel.value) })); if (st) S = st; });
+    const head = h('div', { class: 'section-head' }, h('h1', { text: 'Tableau de bord' }), h('span', { class: 'muted small', text: 'Mesure' }), intervalSel,
+      h('button', { class: 'btn', onclick: () => editMonitored() }, 'Choisir les serveurs…'));
+    if (!watched.length) {
+      return h('div', {}, head, h('div', { class: 'empty' },
+        h('div', { text: 'Aucun serveur surveillé.' }),
+        h('div', { class: 'muted small', text: 'CPU, RAM, disques, charge, réseau, services et conteneurs, mesurés par SSH sans rien installer sur le serveur. Alertes et notifications en cas de problème.' }),
+        h('button', { class: 'btn primary', onclick: () => editMonitored() }, 'Choisir les serveurs à surveiller')));
+    }
+    const summary = monSummary(watched);
+    const sorted = [...watched].sort((a, b) => ((MON[b.id] || {}).alerts || []).length - ((MON[a.id] || {}).alerts || []).length || a.label.localeCompare(b.label));
+    return h('div', {}, head, summary, h('div', { class: 'mon-grid' }, sorted.map(monTile)));
+  }
+  async function editMonitored() {
+    const boxes = S.hosts.map(x => { const c = h('input', { type: 'checkbox' }); c.checked = !!x.monitor; const sv = h('input', { value: x.monitorServices || '', placeholder: 'services (nginx, docker…)', spellcheck: 'false' }); return { x, c, sv }; });
+    const ok = await modal({
+      title: 'Serveurs surveillés', wide: true,
+      body: [h('p', { class: 'muted small', text: 'Les serveurs doivent avoir été ouverts une fois en SSH (empreinte validée). Les hosts avec 2FA ne peuvent pas être surveillés en arrière-plan.' }),
+        h('div', { class: 'mon-pick' }, boxes.map(b => h('div', { class: 'mon-pick-row' }, h('label', { class: 'check' }, b.c, `${b.x.label}`, h('span', { class: 'muted small', text: ` ${b.x.username}@${b.x.hostname}` })), b.sv)))],
+      actions: [{ label: 'Annuler', value: false }, { label: 'Enregistrer', class: 'primary', value: true }]
+    });
+    if (!ok) return;
+    let st = null;
+    for (const b of boxes) {
+      if (!!b.x.monitor === b.c.checked && (b.x.monitorServices || '') === b.sv.value) continue;
+      st = await guard(() => api.invoke('host:save', { ...b.x, monitor: b.c.checked, monitorServices: b.sv.value }));
+    }
+    if (st) { setState(st); toast('Surveillance mise à jour — premières mesures dans quelques secondes'); }
+  }
+  api.on('monitor:update', ({ hostId, last, history, alerts: al }) => {
+    const d = MON[hostId] || (MON[hostId] = { history: [] });
+    d.last = last; d.alerts = al; if (history) { d.history.push(history); while (d.history.length > 120) d.history.shift(); }
+    refreshMon(hostId);
+  });
+  api.on('monitor:alert', (a) => toast(`${a.state === 'new' ? (a.level === 'crit' ? '🔴' : '🟠') : '✅ Rétabli —'} ${a.host} : ${a.msg}`, a.state === 'new' && a.level === 'crit'));
+  api.on('monitor:focus', () => { activateTab('home'); ui.section = 'dashboard'; document.querySelectorAll('.nav-item').forEach(x => x.classList.toggle('active', x.dataset.section === 'dashboard')); renderSection(); });
+  async function loadMonSnapshot() { const snap = await api.invoke('monitor:snapshot').catch(() => null); if (snap) { Object.assign(MON, snap); if (ui.section === 'dashboard') renderSection(); } }
+
   // ---------- Journal d'audit et enregistrements ----------
   const AUDIT_TYPES = {
     connect: ['🔌', 'Connexion'], 'connect-failed': ['⛔', 'Connexion échouée'], disconnect: ['⏏', 'Déconnexion'], command: ['❯', 'Commande'],
@@ -1316,6 +1463,8 @@
         [[30, 'Garder 30 jours'], [90, 'Garder 90 jours'], [180, 'Garder 6 mois'], [365, 'Garder 1 an'], [0, 'Garder tout']], true),
       h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Activer le journal d\'audit' })),
         checkbox(S.settings.auditEnabled !== false, async (c) => { const s = await guard(() => api.invoke('settings:save', { auditEnabled: c.checked })); if (s) S = s; })),
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Notifications du tableau de bord' }), h('div', { class: 'muted small', text: 'Notification système quand un serveur surveillé est en alerte ou redevient normal.' })),
+        checkbox(S.settings.monitorNotify !== false, async (c) => { const st2 = await guard(() => api.invoke('settings:save', { monitorNotify: c.checked })); if (st2) S = st2; })),
       settingSelect('Enregistrement des sessions SSH', 'Tout ce qui s\'affiche est enregistré (chiffré) pour être relu dans Journal ▸ Enregistrements. Les mots de passe tapés à une invite masquée ne s\'affichent pas, donc ne sont pas enregistrés.', 'recordSessions', 'marked',
         [['marked', 'Hosts cochés « Enregistrer »'], ['all', 'Toutes les sessions SSH'], ['off', 'Jamais']])
     ];

@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.13.0** · Windows, Linux et **macOS**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.14.0** · Windows, Linux et **macOS**
 
 ---
 
@@ -23,6 +23,7 @@
    - [Keychain et mots de passe](#keychain-et-mots-de-passe)
    - [Port forwarding](#port-forwarding)
    - [VPN WireGuard](#vpn-wireguard)
+   - [Tableau de bord des serveurs](#tableau-de-bord-des-serveurs)
    - [Production, journal d'audit et enregistrements](#production-journal-daudit-et-enregistrements)
    - [Synchronisation entre PC](#synchronisation-entre-pc)
    - [Known hosts](#known-hosts)
@@ -64,6 +65,7 @@
 | **Mots de passe** | Boutons **afficher / masquer** et **copier** partout ; presse-papiers effacé automatiquement après 30 s |
 | **Keychain** | Import OpenSSH / PEM / PuTTY `.ppk`, génération ed25519 / RSA 4096, export, copie de la clé publique |
 | **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
+| **Tableau de bord** | Serveurs surveillés par SSH **sans agent** : CPU, RAM, swap, disques, charge, réseau, services (systemd ou processus), conteneurs Docker, courbes ~2 h ; alertes (disque plein, RAM, charge, service arrêté, serveur injoignable) avec **notification système** |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
 | **Synchronisation** | Coffre **chiffré** partagé entre tes PC (Windows ↔ Linux) via **Google Drive en connexion directe**, un dossier cloud ou un dépôt GitHub privé ; fusion automatique, conflits résolus |
 | **Production** | Hosts marqués **PROD** (badge et cadre rouges) ; commande dangereuse (`rm -rf /`, `DROP`, `mkfs`, `reboot`, `git push --force`…) bloquée jusqu'à ce qu'on retape le nom du host |
@@ -275,6 +277,17 @@ Fonctionnement : chaque VPN démarré lance `kst-wg` (wireguard-go officiel + pi
 - `DNS =` du `.conf` sert à résoudre les noms internes ; sans DNS, les noms sont résolus par le PC.
 - Avec un jump host, c'est le VPN du **bastion** (premier saut) qui est utilisé.
 - *« injoignable dans le tunnel »* : serveur éteint, adresse hors des `AllowedIPs`, ou pas de handshake (Endpoint ou clés incorrects). Le statut *« en attente du serveur »* signifie qu'aucun handshake n'a encore abouti.
+
+### Tableau de bord des serveurs
+
+Menu **📊 Tableau de bord** ▸ **Choisir les serveurs…** (ou, dans la fiche d'un host, case **Surveiller** + champ **Services à surveiller**, ex. `nginx, docker, mysql`).
+
+- Rien à installer sur le serveur : KSTermus garde une connexion SSH de fond par serveur surveillé (VPN et jump host compris) et lance une seule commande qui lit `/proc`, `df`, `systemctl` et `docker ps`.
+- Mesure toutes les 30 s, chaque minute (par défaut) ou toutes les 5 min ; bouton **⟳** pour mesurer tout de suite.
+- Chaque tuile : système, durée de fonctionnement, CPU et RAM avec courbe, disque le plus rempli, débit réseau, services (● actif / ○ arrêté), conteneurs. Clic sur la tuile = détail de tous les montages.
+- Alertes : disque ≥ 90 % (critique ≥ 97 %), RAM ≥ 90 %, charge > 2 × nombre de cœurs, service arrêté, serveur injoignable. Une notification système à l'apparition et à la disparition de chaque alerte (désactivable dans **Paramètres**), enregistrée aussi dans le journal d'audit.
+- Les cartes de la page Hosts affichent une ligne `📊 CPU · RAM · Disque`.
+- Conditions : le serveur doit avoir été ouvert une fois en SSH (empreinte validée) ; la surveillance ne pose jamais de question, donc les hosts avec 2FA / OTP ne sont pas surveillables. Mesures complètes sur Linux ; sur les autres systèmes, seules les informations de base s'affichent.
 
 ### Production, journal d'audit et enregistrements
 
@@ -583,6 +596,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.14.0** | **Tableau de bord des serveurs** : surveillance sans agent par SSH (CPU, RAM, disques, charge, réseau, services, Docker), courbes, alertes et notifications système, ligne de métriques sur les cartes |
 | **1.13.0** | **macOS** (Apple Silicon et Intel) : `.dmg` / `.zip` construits sur un Mac par GitHub Actions, signature ad-hoc, menu Édition (Cmd+C/V), raccourcis Cmd, boutons de fenêtre à gauche, moteur WireGuard macOS |
 | **1.12.0** | **Google Drive en connexion directe** pour la synchronisation (sans client Drive installé, idéal sous Linux) : OAuth + PKCE dans le navigateur, espace caché de l'application, jeton chiffré dans le coffre |
 | **1.11.0** | **Synchronisation chiffrée entre PC** (dossier cloud ou GitHub privé) : fusion à trois voies, résolution des conflits, automatique (modification, déverrouillage, 5 min), indicateur et liste des PC |

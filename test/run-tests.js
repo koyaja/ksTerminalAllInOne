@@ -608,6 +608,71 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     mgr.close('fq');
   }
 
+  console.log('Tableau de bord (surveillance)');
+  {
+    const { Monitor, parse, alerts, probeScript } = require('../src/main/monitor');
+    const SEP = '@@KST@@';
+    const sample = (statIdle, rx, user = 1000) => [`${SEP}uname`, 'Linux 6.8.0 x86_64', `${SEP}os`, 'Ubuntu 24.04 LTS', `${SEP}host`, 'prodks', `${SEP}uptime`, '864000.5 100.0',
+      `${SEP}load`, '9.10 8.50 1.00 2/300 999', `${SEP}cpus`, '2', `${SEP}stat`, `cpu  ${user} 0 1000 ${statIdle} 0 0 0 0 0 0`,
+      `${SEP}mem`, 'MemTotal:        4000000 kB', 'MemAvailable:     200000 kB', 'SwapTotal:       1000000 kB', 'SwapFree:         500000 kB',
+      `${SEP}disk`, '/dev/sda1 100000000 95000000 5000000 95% /', '/dev/sdb1 200000000 20000000 180000000 10% /data', '/dev/loop0 1000 1000 0 100% /snap/core/1',
+      `${SEP}net`, '    lo: 999 0 0 0 0 0 0 0 999 0 0 0 0 0 0 0', `  eth0: ${rx} 10 0 0 0 0 0 0 5000 10 0 0 0 0 0 0`,
+      `${SEP}services`, 'nginx active', 'mysql failed', `${SEP}docker`, '3', '5', `${SEP}end`].join('\n');
+    await test('surveillance : lecture des mesures (CPU, RAM, disques, réseau, services, docker)', async () => {
+      const m1 = parse(sample(8000, 100000), null, 1000);
+      assert.strictEqual(m1.cpu, undefined, 'pas de CPU sans mesure précédente');
+      const m2 = parse(sample(8500, 160000, 1500), m1, 61000);
+      assert.strictEqual(m2.cpu, 50, 'CPU = 1 - Δidle/Δtotal');
+      assert.strictEqual(m2.mem, 95); assert.strictEqual(m2.swap, 50);
+      assert.deepStrictEqual(m2.disks.map(d => d.mount), ['/', '/data'], '/snap ignoré');
+      assert.strictEqual(m2.disk, 95); assert.strictEqual(m2.rxRate, 1000);
+      assert.deepStrictEqual(m2.load, [9.1, 8.5, 1]); assert.strictEqual(m2.uptimeSec, 864001);
+      assert.deepStrictEqual(m2.docker, { running: 3, total: 5 });
+      assert.deepStrictEqual(m2.services.map(x => x.ok), [true, false]);
+      const al = alerts(m2).map(x => x.key).sort();
+      assert.deepStrictEqual(al, ['disk:/', 'load', 'mem', 'svc:mysql']);
+      assert.deepStrictEqual(alerts({ ok: false, error: 'timeout' }).map(x => x.key), ['down']);
+      assert.throws(() => parse('incomplet'), /incomplète/);
+      assert.ok(!probeScript(['nginx', 'x; rm -rf /', '$(id)']).includes('rm -rf'), 'noms de services filtrés (pas d\'injection)');
+    });
+    await test('surveillance : mesure réelle par SSH, alertes notifiées une seule fois, host injoignable', async () => {
+      const notes = [], evs = [];
+      vault.data.hosts.push({ id: 'mon1', label: 'Surveillé', hostname: H, port: P, username: U, auth: 'password', password: PW, monitor: true, monitorServices: 'ssh, service-qui-nexiste-pas' });
+      vault.data.hosts.push({ id: 'mon2', label: 'Éteint', hostname: '127.0.0.1', port: 1, username: 'x', auth: 'password', password: 'x', monitor: true });
+      const mon = new Monitor({ manager: mgr, getHosts: () => vault.data.hosts, emit: (c, p) => evs.push(p), notify: (a) => notes.push(a) });
+      try {
+        await mon.tick(); await sleep(1100); await mon.tick();
+        const snap = mon.snapshot();
+        const m = snap.mon1.last;
+        assert.ok(m.ok, m.error);
+        assert.ok(m.memTotal > 0 && m.disks.length > 0 && m.cpus > 0, JSON.stringify(m).slice(0, 300));
+        assert.ok(typeof m.cpu === 'number', 'CPU calculé à la 2e mesure');
+        assert.ok(m.os && m.uptimeSec > 0);
+        assert.strictEqual(snap.mon1.history.length, 2);
+        assert.strictEqual(snap.mon2.last.ok, false);
+        const down = notes.filter(n => n.hostId === 'mon2' && n.key === 'down');
+        assert.strictEqual(down.length, 1, 'alerte « injoignable » notifiée une seule fois');
+        assert.ok(notes.some(n => n.hostId === 'mon1' && n.key === 'svc:service-qui-nexiste-pas'), 'service inexistant signalé');
+        assert.ok(!notes.some(n => n.key === 'svc:ssh'), JSON.stringify(m.services));
+        // host qui revient → alerte levée
+        vault.data.hosts.find(h => h.id === 'mon2').port = P; Object.assign(vault.data.hosts.find(h => h.id === 'mon2'), { username: U, password: PW });
+        await mon.tick();
+        assert.ok(notes.some(n => n.hostId === 'mon2' && n.key === 'down' && n.state === 'resolved'));
+      } finally { mon.stop(); vault.data.hosts = vault.data.hosts.filter(h => !h.id.startsWith('mon')); }
+    });
+    await test('surveillance : jamais de question en arrière-plan (empreinte inconnue)', async () => {
+      const saved = { ...vault.data.knownHosts };
+      vault.data.knownHosts = {};
+      let asked = 0; const prevAsk = mgr.bridge.askHostKey; mgr.bridge.askHostKey = async () => { asked++; return true; };
+      vault.data.hosts.push({ id: 'mon3', label: 'Inconnu', hostname: H, port: P, username: U, auth: 'password', password: PW, monitor: true });
+      const mon = new Monitor({ manager: mgr, getHosts: () => vault.data.hosts.filter(h => h.id === 'mon3') });
+      try {
+        const m = await mon.measure(vault.data.hosts.find(h => h.id === 'mon3'));
+        assert.strictEqual(m.ok, false); assert.match(m.error, /empreinte/i); assert.strictEqual(asked, 0);
+      } finally { mon.stop(); mgr.bridge.askHostKey = prevAsk; vault.data.knownHosts = saved; vault.data.hosts = vault.data.hosts.filter(h => h.id !== 'mon3'); }
+    });
+  }
+
   console.log('Sécurité : commandes dangereuses, audit, enregistrement');
   await test('commandes dangereuses : détectées, sans faux positifs courants', async () => {
     const D = require('../src/renderer/danger.js');

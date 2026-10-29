@@ -73,7 +73,9 @@ class SshManager {
   //   donc plusieurs rebonds possibles) puis on ouvre un canal direct-tcpip vers la cible ;
   // - 2FA : les questions keyboard-interactive du serveur (code OTP…) sont posées à l'utilisateur ;
   //   seules les questions de type « mot de passe » sont remplies automatiquement, une fois.
-  async connect(hostId, chain = []) {
+  // opts.background : connexion de fond (surveillance) — jamais de question à l'utilisateur
+  // (empreinte inconnue ou 2FA → échec explicite au lieu d'une fenêtre).
+  async connect(hostId, chain = [], opts = {}) {
     const host = this.hostById(hostId);
     if (chain.includes(hostId)) throw new Error('Boucle de jump hosts : ' + [...chain, hostId].map(id => this.hostById(id).label).join(' → '));
     if (chain.length >= 5) throw new Error('Trop de rebonds (5 max.)');
@@ -85,7 +87,7 @@ class SshManager {
     if (host.jumpHostId) {
       if (!vault.data.hosts.some(h => h.id === host.jumpHostId)) throw new Error('Le jump host de « ' + host.label + ' » n\'existe plus');
       const jump = this.hostById(host.jumpHostId);
-      try { jumpConn = await this.connect(host.jumpHostId, [...chain, hostId]); }
+      try { jumpConn = await this.connect(host.jumpHostId, [...chain, hostId], opts); }
       catch (e) { throw new Error(`Jump host « ${jump.label} » : ${e.message}`); }
       try {
         cfg.sock = await new Promise((res, rej) => jumpConn.forwardOut('127.0.0.1', 0, cfg.host, cfg.port, (e, st) => e ? rej(e) : res(st)));
@@ -105,6 +107,7 @@ class SshManager {
     return new Promise((resolve, reject) => {
       const conn = new Client();
       let settled = false;
+      let bgError = null;
       const fail = (err) => { if (!settled) { settled = true; reject(err); } conn.end(); if (jumpConn) jumpConn.end(); };
       if (jumpConn) {
         conn.on('close', () => jumpConn.end());
@@ -116,6 +119,7 @@ class SshManager {
         const info = keyInfo(rawKey);
         const known = vault.data.knownHosts[hostKeyId];
         if (known && known.fingerprint === info.fingerprint) return verify(true);
+        if (opts.background) { bgError = known ? 'Empreinte du serveur MODIFIÉE' : 'Serveur jamais connecté : ouvre-le une fois en SSH pour valider son empreinte'; return verify(false); }
         const payload = { host: hostKeyId, label: host.label, ...info, previous: known || null };
         this.bridge.askHostKey(payload).then(ok => {
           if (ok) {
@@ -136,6 +140,7 @@ class SshManager {
           return finish(prompts.map(() => host.password));
         }
         // Sinon (code OTP, nouveau mot de passe, question inconnue…) : on demande à l'utilisateur.
+        if (opts.background) { bgError = 'Authentification interactive (2FA) requise : surveillance impossible en arrière-plan'; return finish([]); }
         const ask = this.bridge.askPrompts;
         if (!ask) return finish(prompts.map(() => ''));
         ask({
@@ -153,6 +158,7 @@ class SshManager {
           let msg = err.message;
           if (err.level === 'client-authentication') msg = 'Authentification refusée (identifiant, mot de passe, clé ou code 2FA)';
           else if (/verification failed/i.test(msg)) msg = 'Clé d\'hôte refusée';
+          if (opts.background && bgError) msg = bgError;
           fail(new Error(msg));
         }
       });
