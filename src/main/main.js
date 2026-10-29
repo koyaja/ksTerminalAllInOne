@@ -509,6 +509,7 @@ handle('host:save', (input) => {
     monitor: !!input.monitor,
     monitorServices: String(input.monitorServices || '').split(/[\s,;]+/).filter(x => /^[\w@.:-]{1,64}$/.test(x)).join(', '),
     record: !!input.record,
+    shellIntegration: input.shellIntegration !== false,
     color: input.color || '',
     notes: input.notes || '',
     password: existing ? existing.password : '',

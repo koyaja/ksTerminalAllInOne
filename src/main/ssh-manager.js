@@ -1,4 +1,5 @@
 'use strict';
+const { Injector } = require('./shell-integration');
 // Gestion des connexions SSH : terminaux, SFTP et tunnels (L / R / SOCKS).
 // Indépendant d'Electron : reçoit un "bridge" { vault, emit, askHostKey }.
 
@@ -175,14 +176,25 @@ class SshManager {
         if (err) { conn.end(); return reject(err); }
         const dec = new StringDecoder('utf8');
         const decErr = new StringDecoder('utf8');
-        this.sessions.set(sessionId, { conn, stream, kind: 'shell' });
-        stream.on('data', d => this.bridge.emit('term:data', { sessionId, data: dec.write(d) }));
-        stream.stderr.on('data', d => this.bridge.emit('term:data', { sessionId, data: decErr.write(d) }));
+        const sess = { conn, stream, kind: 'shell', inj: null };
+        this.sessions.set(sessionId, sess);
+        const out = (data) => { if (data) this.bridge.emit('term:data', { sessionId, data }); };
+        const startup = () => { if (host.startupCommand) stream.write(host.startupCommand.replace(/\r?\n?$/, '\n')); };
+        const vs = this.bridge.vault && this.bridge.vault.isUnlocked && this.bridge.vault.isUnlocked() ? (this.bridge.vault.data.settings || {}) : {};
+        if (vs.shellIntegration !== false && host.shellIntegration !== false) {
+          sess.inj = new Injector({
+            emit: out, send: (d) => stream.write(d),
+            onDone: (ok) => { sess.inj = null; this.bridge.emit('term:shell', { sessionId, integration: ok }); startup(); }
+          });
+        }
+        stream.on('data', d => { const s2 = dec.write(d); if (sess.inj) sess.inj.data(s2); else out(s2); });
+        stream.stderr.on('data', d => out(decErr.write(d)));
         // « clean » = le shell distant s'est terminé normalement (exit, logout) : pas de reconnexion auto.
         let exitInfo = null;
         stream.on('exit', (code, signal) => { exitInfo = { code, signal }; });
         const done = (reason) => {
           if (!this.sessions.has(sessionId)) return;
+          if (sess.inj) { const i = sess.inj; sess.inj = null; i.onDone = () => {}; i.cancel(); }
           this.sessions.delete(sessionId);
           const clean = !!exitInfo;
           if (clean) reason = exitInfo.signal ? `Session terminée (signal ${exitInfo.signal})` : `Session terminée (code ${exitInfo.code ?? 0})`;
@@ -192,7 +204,7 @@ class SshManager {
         stream.on('close', () => setTimeout(() => done(exitInfo ? '' : 'Connexion perdue'), 50));
         conn.on('close', () => done('Connexion perdue'));
         conn.on('error', e => done('Connexion perdue : ' + e.message));
-        if (host.startupCommand) stream.write(host.startupCommand.replace(/\r?\n?$/, '\n'));
+        if (!sess.inj) startup();
         resolve(true);
       });
     });
@@ -200,7 +212,7 @@ class SshManager {
 
   write(sessionId, data) {
     const s = this.sessions.get(sessionId);
-    if (s && s.stream) s.stream.write(data);
+    if (s && s.stream) { if (s.inj && s.inj.write(data)) return; s.stream.write(data); }
   }
 
   resize(sessionId, cols, rows) {

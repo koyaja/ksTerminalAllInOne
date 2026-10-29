@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.14.0** · Windows, Linux et **macOS**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.15.0** · Windows, Linux et **macOS**
 
 ---
 
@@ -28,6 +28,7 @@
    - [Synchronisation entre PC](#synchronisation-entre-pc)
    - [Known hosts](#known-hosts)
    - [Verrouillage et Windows Hello](#verrouillage-et-windows-hello)
+   - [Intégration shell](#intégration-shell)
    - [Recherche dans le terminal](#recherche-dans-le-terminal)
    - [Mises à jour automatiques](#mises-à-jour-automatiques)
 5. [Raccourcis clavier](#raccourcis-clavier)
@@ -66,6 +67,7 @@
 | **Keychain** | Import OpenSSH / PEM / PuTTY `.ppk`, génération ed25519 / RSA 4096, export, copie de la clé publique |
 | **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
 | **Tableau de bord** | Serveurs surveillés par SSH **sans agent** : CPU, RAM, swap, disques, charge, réseau, services (systemd ou processus), conteneurs Docker, courbes ~2 h ; alertes (disque plein, RAM, charge, service arrêté, serveur injoignable) avec **notification système** |
+| **Intégration shell** | bash / zsh en SSH, **sans rien installer** : marque verte / rouge + code de retour et durée de chaque commande, **dossier courant** suivi (SFTP et éditeur s'y ouvrent, retour au même dossier après reconnexion), notification quand une commande longue se termine |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
 | **Synchronisation** | Coffre **chiffré** partagé entre tes PC (Windows ↔ Linux) via **Google Drive en connexion directe**, un dossier cloud ou un dépôt GitHub privé ; fusion automatique, conflits résolus |
 | **Production** | Hosts marqués **PROD** (badge et cadre rouges) ; commande dangereuse (`rm -rf /`, `DROP`, `mkfs`, `reboot`, `git push --force`…) bloquée jusqu'à ce qu'on retape le nom du host |
@@ -337,6 +339,18 @@ La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la conne
 - **Tout fermer** : 🔒 ▸ *Tout fermer et verrouiller le coffre*, ou le lien sous le formulaire de l'écran verrouillé (deux clics). Les sessions sont fermées et la clé est effacée de la mémoire.
 - *Écran + démarrage* garde la clé du coffre dans `%APPDATA%\KSTermus\hello.kst`, chiffrée par **DPAPI** (liée à ta session Windows) et libérée seulement après Hello. Changer le mot de passe maître met ce fichier à jour ; *Désactivé* le supprime.
 
+### Intégration shell
+
+Active par défaut pour les sessions SSH dont le shell est **bash** ou **zsh** (icône ⚡ dans la barre du terminal).
+
+- À la connexion, dès que l'invite apparaît, KSTermus tape une ligne **invisible** qui ajoute des hooks au shell en cours (séquences standard OSC 133 et OSC 7). Rien n'est écrit sur le serveur, `~/.bashrc` n'est pas touché, la ligne est retirée de l'historique bash.
+- Chaque commande a une marque dans la marge : **verte** (réussie), **rouge** (code ≠ 0), **orange clignotante** (en cours). Survol = code de retour, durée, heure.
+- Le **dossier courant** s'affiche dans la barre (📂 `/var/log`) : clic = SFTP ouvert dans ce dossier ; les boutons **📁 SFTP** et **📝 Éditer** partent aussi de là. Après une reconnexion automatique, le terminal revient dans le même dossier.
+- **Copier la sortie de la dernière commande** (palette `Ctrl+Shift+P`) copie exactement la sortie, sans l'invite suivante.
+- **Commandes longues** : si une commande dure plus de 10 s (réglable : 30 s, 1 min, 5 min, jamais) et se termine pendant que tu es sur un autre onglet ou une autre fenêtre, notification avec le résultat (✓ / ✗ code) et la durée.
+- Désactivable globalement (**Paramètres**) ou par host (case **Intégration shell** dans la fiche). Autres shells (fish, sh, tcsh), menus de connexion et invites non reconnues : rien n'est tapé, la session reste normale.
+- zsh sans l'option `HIST_IGNORE_SPACE` (activée par oh-my-zsh) : la ligne d'installation reste dans l'historique de la session.
+
 ### Recherche dans le terminal
 
 `Ctrl+Shift+F` (ou préfixe `/`, ou la palette) ouvre une barre de recherche dans le panneau actif. Le texte sélectionné est repris automatiquement.
@@ -596,6 +610,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.15.0** | **Intégration shell** bash / zsh en SSH (sans rien installer) : statut, code et durée de chaque commande, dossier courant (SFTP / éditeur / reconnexion), notification des commandes longues |
 | **1.14.0** | **Tableau de bord des serveurs** : surveillance sans agent par SSH (CPU, RAM, disques, charge, réseau, services, Docker), courbes, alertes et notifications système, ligne de métriques sur les cartes |
 | **1.13.0** | **macOS** (Apple Silicon et Intel) : `.dmg` / `.zip` construits sur un Mac par GitHub Actions, signature ad-hoc, menu Édition (Cmd+C/V), raccourcis Cmd, boutons de fenêtre à gauche, moteur WireGuard macOS |
 | **1.12.0** | **Google Drive en connexion directe** pour la synchronisation (sans client Drive installé, idéal sous Linux) : OAuth + PKCE dans le navigateur, espace caché de l'application, jeton chiffré dans le coffre |

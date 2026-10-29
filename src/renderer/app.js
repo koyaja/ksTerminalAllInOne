@@ -549,6 +549,7 @@
       env: h('select', {}, h('option', { value: '', text: '—' }), h('option', { value: 'dev', text: 'Développement' }), h('option', { value: 'staging', text: 'Recette / staging' }), h('option', { value: 'prod', text: '🔴 PRODUCTION' })),
       record: h('input', { type: 'checkbox' }),
       monitor: h('input', { type: 'checkbox' }),
+      si: h('input', { type: 'checkbox' }),
       monitorServices: h('input', { placeholder: 'nginx, docker, mysql, php8.3-fpm…', spellcheck: 'false' }),
       vpn: h('select', {}, h('option', { value: '', text: 'Comme le groupe' }), h('option', { value: 'none', text: 'Aucun VPN' }),
         (S.vpns || []).map(v => h('option', { value: v.id, text: '🌐 ' + v.name })))
@@ -556,6 +557,7 @@
     f.env.value = x.env || '';
     f.record.checked = !!x.record;
     f.monitor.checked = !!x.monitor;
+    f.si.checked = x.shellIntegration !== false;
     f.monitorServices.value = x.monitorServices || '';
     f.vpn.value = x.vpnId && (x.vpnId === 'none' || (S.vpns || []).some(v => v.id === x.vpnId)) ? x.vpnId : '';
     const vpnHint = () => {
@@ -601,6 +603,7 @@
           h('label', { class: 'check', style: { alignSelf: 'center', marginTop: '14px' } }, f.record, 'Enregistrer les sessions')),
         h('div', { class: 'form-row' }, h('label', { class: 'check', style: { alignSelf: 'center', marginTop: '14px', whiteSpace: 'nowrap' } }, f.monitor, 'Surveiller (tableau de bord)'),
           field('Services à surveiller', f.monitorServices)),
+        h('label', { class: 'check', title: 'bash / zsh : statut et durée de chaque commande, dossier courant, notification des commandes longues. Rien n\'est installé sur le serveur.' }, f.si, 'Intégration shell (bash / zsh)'),
         field('VPN WireGuard', f.vpn, 'Démarré automatiquement à la connexion. Avec un jump host, c\'est le VPN du bastion qui compte.'),
         field('Passer par (jump host / bastion)', f.jump, 'La connexion passe d\'abord par ce serveur, qui peut lui-même passer par un autre (plusieurs rebonds).'),
         field('Commande au démarrage', f.startup),
@@ -613,7 +616,7 @@
             password: f.password.value, clearPassword: f.clear.checked,
             sudoPassword: f.sudoPassword.value, clearSudoPassword: f.clearSudo.checked, startupCommand: f.startup.value, color,
             jumpHostId: f.jump.value || null, vpnId: f.vpn.value, env: f.env.value, record: f.record.checked,
-            monitor: f.monitor.checked, monitorServices: f.monitorServices.value
+            monitor: f.monitor.checked, monitorServices: f.monitorServices.value, shellIntegration: f.si.checked
           }));
           if (!s) return false;
           setState(s); return true;
@@ -1465,6 +1468,10 @@
         checkbox(S.settings.auditEnabled !== false, async (c) => { const s = await guard(() => api.invoke('settings:save', { auditEnabled: c.checked })); if (s) S = s; })),
       h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Notifications du tableau de bord' }), h('div', { class: 'muted small', text: 'Notification système quand un serveur surveillé est en alerte ou redevient normal.' })),
         checkbox(S.settings.monitorNotify !== false, async (c) => { const st2 = await guard(() => api.invoke('settings:save', { monitorNotify: c.checked })); if (st2) S = st2; })),
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Intégration shell (SSH bash / zsh)' }), h('div', { class: 'muted small', text: 'Marque verte / rouge et durée de chaque commande, dossier courant (SFTP et éditeur s\'ouvrent dedans, retour au même dossier après une reconnexion). Une ligne invisible est tapée à la connexion ; rien n\'est écrit sur le serveur. Prend effet aux prochaines connexions.' })),
+        checkbox(S.settings.shellIntegration !== false, async (c) => { const st2 = await guard(() => api.invoke('settings:save', { shellIntegration: c.checked })); if (st2) S = st2; })),
+      settingSelect('Notifier les commandes longues', 'Quand une commande dure plus longtemps que ce seuil et se termine pendant que tu regardes ailleurs (autre onglet, autre fenêtre) : notification avec le résultat.', 'notifyLongCommands', 10,
+        [[0, 'Jamais'], [10, 'Plus de 10 s'], [30, 'Plus de 30 s'], [60, 'Plus d\'1 min'], [300, 'Plus de 5 min']], true),
       settingSelect('Enregistrement des sessions SSH', 'Tout ce qui s\'affiche est enregistré (chiffré) pour être relu dans Journal ▸ Enregistrements. Les mots de passe tapés à une invite masquée ne s\'affichent pas, donc ne sont pas enregistrés.', 'recordSessions', 'marked',
         [['marked', 'Hosts cochés « Enregistrer »'], ['all', 'Toutes les sessions SSH'], ['off', 'Jamais']])
     ];
@@ -1762,8 +1769,8 @@
     const bar = h('div', { class: 'session-bar' }, info, h('span', { class: 'spacer' }),
       splitR, splitD, bcBtn, snipBtn,
       h('button', { class: 'btn sm', title: 'Sauvegarder cette disposition comme espace de travail', onclick: () => saveWorkspace(t) }, '💾'),
-      h('button', { class: 'btn sm ssh-only', title: 'Ouvrir et éditer un fichier du serveur (normal ou sudo)', onclick: sshOnly(p => promptOpenFile(p.spec.hostId)) }, '📝 Éditer'),
-      h('button', { class: 'btn sm ssh-only', title: 'SFTP sur le host du panneau actif', onclick: sshOnly(p => openSftp(p.spec.hostId)) }, '📁 SFTP'));
+      h('button', { class: 'btn sm ssh-only', title: 'Ouvrir et éditer un fichier du serveur (normal ou sudo)', onclick: sshOnly(p => promptOpenFile(p.spec.hostId, p.cwd)) }, '📝 Éditer'),
+      h('button', { class: 'btn sm ssh-only', title: 'SFTP sur le host du panneau actif (ouvert dans le dossier courant du terminal)', onclick: sshOnly(p => openSftp(p.spec.hostId, p.cwd)) }, '📁 SFTP'));
     const el = h('div', { class: 'session' }, bar, h('div', { class: 'term-area' }, body));
     $('#sessions').append(el);
     const t = { id, kind: 'term', title: '', el, body, info, bcBtn, panes: new Map(), layout: null, activePane: null, broadcast: false, zoomed: null, customTitle: null };
@@ -1863,6 +1870,7 @@
     p.ro.observe(wrap);
     panes.set(id, p);
     t.panes.set(id, p);
+    shellIntegrationHandlers(p, t);
 
     const setPaneStatus = (st) => { p.status = st; dot.className = 'dot ' + st; renderTabs(); };
     const sendInput = (d, danger) => {
@@ -1870,8 +1878,9 @@
       for (const q of targets) {
         if (/[\r\n]/.test(d)) {
           if (q.term.buffer.active.type === 'normal') {
-            markCommand(q);
-            if (!q.isLocal) for (const c of commandsIn(q, d)) api.auditCommand(q.id, c, danger || null, false);
+            const cmds = commandsIn(q, d);
+            markCommand(q, cmds[0]);
+            if (!q.isLocal) for (const c of cmds) api.auditCommand(q.id, c, danger || null, false);
           }
           resetTyping(q);
           const tail = d.split(/\r\n|\r|\n/).pop();
@@ -1991,6 +2000,7 @@
         overlay(wrap, null);
         setPaneStatus('on');
         if (opts.auto) toast(`✓ ${title0} reconnecté`);
+        if (opts.auto && !isLocal && p.cwd && p.cwd !== '/') api.write(id, ` cd '${p.cwd.replace(/'/g, "'\\''")}'\r`);
         p.retry.attempt = 0;
         p.fit();
         if (t.activePane === id && ui.activeTab === t.id) term.focus();
@@ -2096,17 +2106,89 @@
     return !!ok;
   }
 
-  function markCommand(p) {
+  function markCommand(p, cmd, offset = 0) {
     const term = p.term;
-    const marker = term.registerMarker(0);
-    if (!marker) return;
+    const marker = term.registerMarker(offset);
+    if (!marker) return null;
     p.blocks = p.blocks.filter(b => !b.marker.isDisposed);
-    p.blocks.push({ marker, at: Date.now() });
+    const b = { marker, at: Date.now(), cmd: cmd || '' };
+    p.blocks.push(b);
     if (p.blocks.length > 500) p.blocks.shift();
     try {
       const deco = term.registerDecoration({ marker, x: 0, width: 1, layer: 'top' });
-      if (deco) deco.onRender(el => { el.classList.add('cmd-mark'); el.title = 'Commande exécutée à ' + new Date().toLocaleTimeString('fr-FR'); });
+      if (deco) deco.onRender(el => {
+        el.classList.add('cmd-mark');
+        el.classList.toggle('run', b.exit === undefined && !!b.running);
+        el.classList.toggle('ok', b.exit === 0);
+        el.classList.toggle('ko', b.exit !== undefined && b.exit !== 0);
+        const when = new Date(b.at).toLocaleTimeString('fr-FR');
+        el.title = b.exit === undefined ? `${b.running ? 'En cours depuis' : 'Exécutée à'} ${when}` : `${b.exit === 0 ? '✓ Réussie' : '✗ Échec — code ' + b.exit} · ${fmtDur(b.dur)} · ${when}`;
+      });
     } catch { /* API indisponible : on garde juste les marqueurs */ }
+    return b;
+  }
+
+  // ---------- Intégration shell (OSC 133 / OSC 7, injectée par le processus principal) ----------
+  function fmtDur(ms) {
+    if (ms == null) return '';
+    if (ms < 1000) return ms + ' ms';
+    const s2 = ms / 1000;
+    if (s2 < 60) return s2.toFixed(s2 < 10 ? 1 : 0) + ' s';
+    const m = Math.floor(s2 / 60), r = Math.round(s2 % 60);
+    return m < 60 ? `${m} min ${r} s` : `${Math.floor(m / 60)} h ${m % 60} min`;
+  }
+  function shortPath(pth) { return pth.length > 40 ? '…' + pth.slice(-38) : pth; }
+  function shellIntegrationHandlers(p, t) {
+    const term = p.term;
+    term.parser.registerOscHandler(133, (data) => {
+      const [kind, arg] = data.split(';');
+      if (kind === 'C') {
+        // Bloc créé à l'Entrée (ligne de la commande) ; sinon ligne au-dessus du curseur.
+        let b = p.blocks[p.blocks.length - 1];
+        if (!b || b.marker.isDisposed || b.exit !== undefined || b.running || Date.now() - b.at > 3000) b = markCommand(p, '', -1);
+        if (b) { b.running = true; b.start = Date.now(); b.outMarker = term.registerMarker(0); }
+        p.runBlock = b;
+        p.si = true;
+      } else if (kind === 'D') {
+        const b = p.runBlock; p.runBlock = null;
+        if (b) {
+          b.running = false; b.exit = Number(arg) || 0; b.dur = Date.now() - b.start;
+          b.endMarker = term.registerMarker(0);
+          p.lastExit = b.exit;
+          term.refresh(0, term.rows - 1);
+          commandFinished(p, t, b);
+        }
+      }
+      return true;
+    });
+    term.parser.registerOscHandler(7, (data) => {
+      const m = /^file:\/\/[^/]*(\/.*)$/.exec(data);
+      if (m) {
+        let dir = m[1];
+        try { dir = decodeURIComponent(dir); } catch { /* chemin brut */ }
+        if (dir !== p.cwd) { p.cwd = dir; p.si = true; if (t.activePane === p.id) updateBar(t); }
+      }
+      return true;
+    });
+    term.parser.registerOscHandler(633, () => true);
+  }
+  // Commande longue terminée alors qu'on regarde ailleurs → notification.
+  function commandFinished(p, t, b) {
+    const min = (S.settings.notifyLongCommands ?? 10) * 1000;
+    if (!min || b.dur < min) return;
+    const away = !document.hasFocus() || ui.activeTab !== t.id || t.activePane !== p.id;
+    if (!away) return;
+    const host = p.hostId && hostById(p.hostId);
+    const where = host ? host.label : 'Terminal';
+    const what = (b.cmd || 'Commande').slice(0, 80);
+    const msg = b.exit === 0 ? `✓ ${what} — terminé en ${fmtDur(b.dur)}` : `✗ ${what} — échec (code ${b.exit}) après ${fmtDur(b.dur)}`;
+    toast(`${where} : ${msg}`, b.exit !== 0);
+    if (!document.hasFocus()) {
+      try {
+        const n = new Notification(`KSTermus — ${where}`, { body: msg, silent: false });
+        n.onclick = () => { window.focus(); activateTab(t.id); setActivePane(t, p.id); };
+      } catch { /* notifications indisponibles */ }
+    }
   }
 
   function jumpCommand(p, dir) {
@@ -2122,6 +2204,13 @@
 
   function lastOutput(p) {
     const buf = p.term.buffer.active;
+    const done = p.blocks.filter(b => b.outMarker && b.endMarker && !b.outMarker.isDisposed && !b.endMarker.isDisposed);
+    if (done.length) {
+      const b = done[done.length - 1];
+      const out = [];
+      for (let i = b.outMarker.line; i < b.endMarker.line; i++) { const l = buf.getLine(i); if (l) out.push(l.translateToString(true)); }
+      return { command: b.cmd || (buf.getLine(b.marker.line) || { translateToString: () => '' }).translateToString(true).trim(), output: out.join('\n').replace(/\s+$/, ''), exit: b.exit };
+    }
     const cursorLine = buf.baseY + buf.cursorY;
     const marks = p.blocks.filter(b => !b.marker.isDisposed && b.marker.line < cursorLine);
     if (!marks.length) return null;
@@ -2232,6 +2321,8 @@
       h('span', { class: 'avatar', style: { width: '22px', height: '22px', fontSize: '10px', borderRadius: '6px', background: host.color || COLORS[0] }, text: initials(host.label) }),
       h('span', { class: 'title', text: host.label }),
       h('span', { class: 'sub', text: `${host.username}@${host.hostname}:${host.port}` }),
+      p && p.cwd ? h('span', { class: 'bar-cwd', title: 'Dossier courant (intégration shell) — clic : ouvrir en SFTP', text: '📂 ' + shortPath(p.cwd), onclick: () => openSftp(p.spec.hostId, p.cwd) }) : null,
+      p && p.si ? h('span', { class: 'bar-si', title: 'Intégration shell active : code de retour et durée de chaque commande, dossier courant' , text: '⚡' }) : null,
       t.panes.size > 1 ? h('span', { class: 'badge', text: `${t.panes.size} panneaux` }) : null
     ].filter(Boolean) : []));
     t.bcBtn.classList.toggle('on', t.broadcast);
@@ -3142,7 +3233,7 @@
     });
   }
 
-  function openSftp(hostId) {
+  function openSftp(hostId, startDir) {
     const host = hostById(hostId);
     if (!host) return;
     const id = uid();
@@ -3238,6 +3329,7 @@
       if (!list) { pathInput.value = t.cwd; return; }
       t.cwd = dir; pathInput.value = dir;
       remote.set(list);
+      return true;
     }
     async function lgo(dir) {
       const r = await guard(() => api.invoke('lfs:list', dir));
@@ -3385,7 +3477,7 @@
         const r = await api.invoke('sftp:open', id, hostId);
         if (!tabs.has(id)) { api.invoke('sftp:close', id); return; }
         t.home = r.home; overlay(wrap, null); setStatus(t, 'on');
-        await go(r.home);
+        if (!(startDir && await go(startDir))) await go(r.home);
         remote.focus();
       } catch (e) {
         setStatus(t, 'off');

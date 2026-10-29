@@ -123,6 +123,39 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.ok(events.some(e => e[0] === 'term:exit'));
   });
 
+  await test('intégration shell : invisible, code de retour, dossier courant, hors historique', async () => {
+    events.length = 0;
+    await mgr.openShell('si1', 'h1', 200, 30);
+    const all = () => events.filter(e => e[0] === 'term:data' && e[1].sessionId === 'si1').map(e => e[1].data).join('');
+    for (let i = 0; i < 80 && !events.some(e => e[0] === 'term:shell' && e[1].sessionId === 'si1'); i++) await sleep(100);
+    const ev = events.find(e => e[0] === 'term:shell' && e[1].sessionId === 'si1');
+    assert.ok(ev && ev[1].integration === true, 'intégration active (bash)');
+    mgr.write('si1', 'false\n'); await sleep(400);
+    mgr.write('si1', 'cd /tmp && echo FIN_$((6*7))\n');
+    for (let i = 0; i < 40 && !all().includes('FIN_42'); i++) await sleep(100);
+    mgr.write('si1', 'history | tail -5\n'); await sleep(600);
+    const out = all();
+    assert.ok(!out.includes('__kst_p') && !out.includes('KST;ready'), 'ligne d\'installation invisible');
+    assert.ok(out.includes('\x1b]133;C\x07') && out.includes('\x1b]133;D;1\x07'), 'début de commande + code 1 pour false');
+    assert.ok(/\x1b\]7;file:\/\/[^\x07]*\/tmp\x07/.test(out), 'dossier courant /tmp');
+    const hist = out.slice(out.lastIndexOf('history | tail'));
+    assert.ok(!hist.includes('eval'), 'pas dans l\'historique');
+    mgr.write('si1', 'exit\n'); await sleep(300);
+  });
+  await test('intégration shell : invite non reconnue → rien d\'injecté, saisie transmise', async () => {
+    const { Injector, looksLikePrompt } = require('../src/main/shell-integration');
+    assert.ok(looksLikePrompt('Welcome\r\n\x1b[01;32mkst@srv\x1b[00m:\x1b[01;34m~\x1b[00m$ '));
+    assert.ok(looksLikePrompt('root@srv:~# ') && looksLikePrompt('➜  ~ ') && looksLikePrompt('user@h ~ % '));
+    assert.ok(!looksLikePrompt('[sudo] password for kst: ') && !looksLikePrompt('Choisissez une option [1-3]: '));
+    let t = 0; const sent = [], shown = [];
+    const inj = new Injector({ emit: d => shown.push(d), send: d => sent.push(d), now: () => t, waitMs: 1000 });
+    inj.data('Menu:\r\n1) prod\r\nChoix : '); assert.ok(inj.write('1\r'));
+    t = 2000; inj.check();
+    assert.deepStrictEqual(sent, ['1\r'], 'saisie transmise, aucune injection');
+    assert.strictEqual(shown.join(''), 'Menu:\r\n1) prod\r\nChoix : ');
+    assert.strictEqual(inj.write('x'), false);
+  });
+
   if (AUTH_KEYS) {
     await test('authentification par clé du keychain (avec passphrase)', async () => {
       fs.appendFileSync(AUTH_KEYS, genKey.kp.public + '\n');

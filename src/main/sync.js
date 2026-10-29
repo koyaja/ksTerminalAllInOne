@@ -24,7 +24,8 @@ const FILE_NAME = 'kstermus-sync.kst';
 const ARRAYS = ['hosts', 'keys', 'snippets', 'forwards', 'vpns', 'workspaces'];
 const MAPS = ['knownHosts', 'groupVpns'];
 const SYNCED_SETTINGS = ['theme', 'fontSize', 'tmuxPrefix', 'autoReconnect', 'dangerMode', 'auditEnabled', 'auditRetentionDays',
-  'recordSessions', 'autoLockMinutes', 'lockOnSystemLock', 'ctrlFSearch', 'helloScreen'];
+  'recordSessions', 'autoLockMinutes', 'lockOnSystemLock', 'ctrlFSearch', 'helloScreen',
+  'shellIntegration', 'notifyLongCommands', 'monitorInterval', 'monitorNotify'];
 
 // ----- Utilitaires -----
 function stable(v) {
