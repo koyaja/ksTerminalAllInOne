@@ -565,3 +565,15 @@ td.crit { color: var(--danger); font-weight: 700; } td.warn { color: var(--warn)
 .bar-cwd { font-family: var(--mono); font-size: 11.5px; color: var(--muted); padding: 1px 8px; border-radius: 6px; background: var(--bg-3); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
 .bar-cwd:hover { color: var(--text); background: var(--bg-4); }
 .bar-si { font-size: 11px; color: var(--accent); cursor: help; }
+
+/* ---------- 1.15.1 : cartes de hosts (Windows : police plus large) ---------- */
+.card-sub-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.card-sub-row .card-sub { min-width: 0; }
+.card-sub-row .auth-badge { flex-shrink: 0; font-size: 10.5px; line-height: 16px; padding: 0 7px; }
+.card-actions { flex-wrap: wrap; row-gap: 6px; }
+.icon-btn.ci { width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; flex-shrink: 0; }
+.icon-btn.ci .ico { display: grid; place-items: center; }
+.icon-btn.ci-danger:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.grid { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.card-top > div { overflow: hidden; }
+.card-sub-row { flex-wrap: wrap; row-gap: 3px; }

@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.15.0** · Windows, Linux et **macOS**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.15.1** · Windows, Linux et **macOS**
 
 ---
 
@@ -610,6 +610,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.15.1** | Cartes de hosts sous Windows : icônes au trait identiques sur tous les systèmes, bouton Supprimer plus jamais coupé, type d'authentification à côté de l'adresse |
 | **1.15.0** | **Intégration shell** bash / zsh en SSH (sans rien installer) : statut, code et durée de chaque commande, dossier courant (SFTP / éditeur / reconnexion), notification des commandes longues |
 | **1.14.0** | **Tableau de bord des serveurs** : surveillance sans agent par SSH (CPU, RAM, disques, charge, réseau, services, Docker), courbes, alertes et notifications système, ligne de métriques sur les cartes |
 | **1.13.0** | **macOS** (Apple Silicon et Intel) : `.dmg` / `.zip` construits sur un Mac par GitHub Actions, signature ad-hoc, menu Édition (Cmd+C/V), raccourcis Cmd, boutons de fenêtre à gauche, moteur WireGuard macOS |

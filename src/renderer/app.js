@@ -499,27 +499,39 @@
         h('div', { class: 'avatar', style: { background: x.color || COLORS[0] }, text: initials(x.label) }),
         h('div', { style: { minWidth: 0, flex: 1 } },
           h('div', { class: 'card-title' }, h('span', { text: x.label }), envBadge(x.env), x.record ? h('span', { class: 'rec-badge', title: 'Sessions enregistrées' }, '●REC') : null),
-          h('div', { class: 'card-sub', text: `${x.username}@${x.hostname}${x.port !== 22 ? ':' + x.port : ''}` }),
+          h('div', { class: 'card-sub-row' }, h('span', { class: 'card-sub', text: `${x.username}@${x.hostname}${x.port !== 22 ? ':' + x.port : ''}` }), h('span', { class: 'badge auth-badge', text: authLabel })),
           vpnBadge(x), monMini(x),
           x.jumpHostId && hostById(x.jumpHostId) ? h('div', { class: 'card-via', title: 'Connexion via un jump host', text: `↪ via ${jumpChain(x).join(' → ')}` }) : null)),
       h('div', { class: 'card-actions' },
         h('button', { class: 'btn primary sm', onclick: (e) => { e.stopPropagation(); openTerminal(x.id); } }, 'SSH'),
         h('button', { class: 'btn sm', onclick: (e) => { e.stopPropagation(); openSftp(x.id); } }, 'SFTP'),
         h('span', { class: 'spacer' }),
-        h('span', { class: 'badge', text: authLabel }),
-        x.hasPassword ? h('button', { class: 'icon-btn', title: 'Copier le mot de passe (effacé après 30 s)', onclick: async (e) => {
+        x.hasPassword ? h('button', { class: 'icon-btn ci', title: 'Copier le mot de passe (effacé après 30 s)', onclick: async (e) => {
           e.stopPropagation();
           if (await guard(() => api.invoke('host:copyPassword', x.id))) toast('Mot de passe copié — effacé dans 30 s');
-        } }, '🔑') : null,
-        h('button', { class: 'icon-btn', title: 'Modifier', onclick: (e) => { e.stopPropagation(); editHost(x); } }, '✎'),
-        h('button', { class: 'icon-btn', title: 'Dupliquer', onclick: (e) => { e.stopPropagation(); editHost({ ...x, id: null, label: x.label + ' (copie)', hasPassword: false }); } }, '⧉'),
-        h('button', { class: 'icon-btn', title: 'Supprimer', onclick: async (e) => {
+        } }, ico('key')) : null,
+        h('button', { class: 'icon-btn ci', title: 'Modifier', onclick: (e) => { e.stopPropagation(); editHost(x); } }, ico('edit')),
+        h('button', { class: 'icon-btn ci', title: 'Dupliquer', onclick: (e) => { e.stopPropagation(); editHost({ ...x, id: null, label: x.label + ' (copie)', hasPassword: false }); } }, ico('copy')),
+        h('button', { class: 'icon-btn ci ci-danger', title: 'Supprimer', onclick: async (e) => {
           e.stopPropagation();
           if (await confirmBox('Supprimer le host', `Supprimer « ${x.label} » et ses tunnels ?`)) {
             const s = await guard(() => api.invoke('host:delete', x.id)); if (s) setState(s);
           }
-        } }, '🗑')));
+        } }, ico('trash'))));
     return card;
+  }
+  // Icônes au trait (identiques sur Windows, Linux et macOS, contrairement aux emoji).
+  const ICONS = {
+    key: '<circle cx="5.5" cy="10.5" r="3"/><path d="M7.6 8.4 14 2M11.5 4.5l2 2M10 6l1.5 1.5"/>',
+    edit: '<path d="M10.5 2.5l3 3L6 13H3v-3z"/><path d="M9 4l3 3"/>',
+    copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.8c0-.7-.6-1.3-1.3-1.3H3.8c-.7 0-1.3.6-1.3 1.3v5.4c0 .7.6 1.3 1.3 1.3h1.7"/>',
+    trash: '<path d="M2.5 4.5h11M6.5 4.5V3c0-.3.2-.5.5-.5h2c.3 0 .5.2.5.5v1.5M4 4.5l.7 8.6c0 .5.5.9 1 .9h4.6c.5 0 1-.4 1-.9l.7-8.6M6.8 7v4.5M9.2 7v4.5"/>'
+  };
+  function ico(name) {
+    const sp = document.createElement('span');
+    sp.className = 'ico';
+    sp.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
+    return sp;
   }
 
   async function importConfig() {
