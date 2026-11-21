@@ -21,6 +21,8 @@ const { SftpJobs } = require('./sftp-jobs');
 const { SyncEngine } = require('./sync');
 const gdrive = require('./gdrive');
 const { Monitor } = require('./monitor');
+const { PeerService, makeSyncHub } = require('./peers');
+const { detectShells } = require('./local-pty');
 
 const vault = new Vault(app.getPath('userData'));
 let win = null;
@@ -139,6 +141,10 @@ function flushUnlockFailures() {
 const sftpHosts = new Map(); // sessionId SFTP -> hostId
 function sessionInfoSftp(sessionId) { return sftpHosts.has(sessionId) ? hostMeta(sftpHosts.get(sessionId)) : {}; }
 function hostMeta(hostId) {
+  if (typeof hostId === 'string' && hostId.startsWith('peer:')) {
+    const p = vault.isUnlocked() && (vault.data.peers || []).find(x => x.id === hostId.slice(5));
+    return { hostId, host: p ? `${p.name} (appareil lié)` : 'appareil lié', user: '', address: p ? `${p.addr || '?'}:${p.port || '?'}` : '' };
+  }
   const h = vault.isUnlocked() && vault.data.hosts.find(x => x.id === hostId);
   return h ? { hostId, host: h.label, user: h.username, address: `${h.hostname}:${h.port || 22}` } : { hostId, host: '?' };
 }
@@ -243,7 +249,7 @@ handle('vault:status', () => ({
   helloScreen: vault.isUnlocked() && !!(vault.data.settings || {}).helloScreen,
   version: app.getVersion()
 }));
-function afterUnlock() { lock.unlock(); applyLockSettings(); try { purgeOld(); } catch { /* ignore */ } scheduleSync(1500); if (!monitor.timer) setTimeout(() => { if (vault.isUnlocked()) monitor.start(); }, 2000); return publicState(); }
+function afterUnlock() { lock.unlock(); applyLockSettings(); try { purgeOld(); } catch { /* ignore */ } scheduleSync(1500); setTimeout(() => peerService.start().catch(() => {}), 800); if (!monitor.timer) setTimeout(() => { if (vault.isUnlocked()) monitor.start(); }, 2000); return publicState(); }
 handle('vault:create', (pw) => { vault.create(pw); return afterUnlock(); });
 handle('vault:unlock', (pw) => {
   lock.checkThrottle();
@@ -254,7 +260,7 @@ handle('vault:unlock', (pw) => {
 handle('vault:lock', () => {
   audit.log('lock', { method: 'coffre (tout fermé)' });
   for (const sid of [...sessionInfo.keys()]) sessionEnded(sid, 'coffre verrouillé');
-  monitor.stop(); manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); recorder.stopAll(); vault.lock(); lock.unlock(); return true;
+  peerService.stop(); monitor.stop(); manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); recorder.stopAll(); vault.lock(); lock.unlock(); return true;
 });
 // Verrouillage d'écran : les sessions continuent.
 handle('lock:screen', () => { if (!vault.isUnlocked()) return false; return lock.lock('manuel'); });
@@ -322,6 +328,7 @@ handle('settings:save', (s) => {
   const d = requireUnlocked(); d.settings = { ...d.settings, ...s }; vault.save(); applyLockSettings();
   if ('autoUpdate' in s) fs.writeFileSync(updPrefsFile, JSON.stringify({ autoUpdate: s.autoUpdate !== false }));
   if ('monitorInterval' in s) monitor.restart();
+  if ('peerEnabled' in s) peerService.start().catch(() => {});
   return publicState();
 });
 
@@ -375,6 +382,51 @@ async function runSync() {
 }
 setInterval(() => { if (lock.locked) return; runSync(); }, 5 * 60 * 1000).unref();
 handle('sync:status', () => syncEngine.status());
+
+// ----- Appareils liés (Windows ⇄ Mac sur le même réseau) -----
+function notifyUser({ title, body }) {
+  if (win && !win.isDestroyed()) win.webContents.send('peers:notice', { title, body });
+  if (!Notification.isSupported()) return;
+  const n = new Notification({ title, body, silent: true });
+  n.on('click', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
+  n.show();
+}
+const peerService = new PeerService({
+  vault, local: localMgr,
+  emit: (c, p) => { if (win && !win.isDestroyed()) win.webContents.send(c, p); },
+  notify: notifyUser,
+  audit: (type, who) => audit.log('settings', { action: { 'peer-paired': 'appareil appairé', 'peer-unpaired': 'appareil oublié', 'peer-sftp': 'fichiers ouverts par un appareil lié', 'peer-shell': 'terminal ouvert par un appareil lié', 'peer-attach': 'session rejointe par un appareil lié' }[type] || type, host: who }),
+  isLocked: () => lock.locked,
+  getSettings: () => appSettings(),
+  deviceName: os.hostname().replace(/\.local$/i, ''), platform: process.platform, appVersion: app.getVersion(), userDataDir: app.getPath('userData'),
+  spawnShell: (cols, rows) => {
+    const sh = detectShells()[0];
+    if (!sh) throw new Error('Aucun shell trouvé sur ce PC');
+    return require('@lydell/node-pty').spawn(sh.file, sh.args, { name: 'xterm-256color', cols: Math.max(2, cols), rows: Math.max(2, rows), cwd: os.homedir(), env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'KSTermus' }, useConpty: true });
+  }
+});
+syncEngine.peers = peerService;
+peerService.syncHub = { ...makeSyncHub({ vault, sync: syncEngine, dir: path.join(app.getPath('userData'), 'peer-sync') }), changed: () => scheduleSync(300) };
+peerService.connectPeer = (id) => manager.connect('peer:' + id, [], { background: true });
+manager.bridge.peerHost = (id) => peerService.peerHost(id);
+// Synchronisation via un appareil lié : vérification fréquente (réseau local, coût négligeable).
+setInterval(() => { const c = vault.isUnlocked() && syncEngine.cfg(); if (c && c.method === 'peer' && !lock.locked) runSync(); }, 60 * 1000).unref();
+handle('peers:state', () => { requireUnlocked(); return peerService.state(); });
+handle('peers:pairStart', async () => { requireUnlocked(); return peerService.startPairing(); });
+handle('peers:pairCancel', () => { peerService.cancelPairing(); return peerService.state(); });
+handle('peers:pair', async (opts) => { requireUnlocked(); const r = await peerService.pairWith(opts || {}); return { paired: r, state: peerService.state() }; });
+handle('peers:unpair', (id) => { requireUnlocked(); return peerService.unpair(id); });
+handle('peers:rename', (name) => { requireUnlocked(); return peerService.rename(name); });
+handle('peers:refresh', () => { peerService.send({ t: 'query' }); return peerService.state(); });
+handle('peers:sessions', (id) => { requireUnlocked(); return peerService.remoteSessions(id); });
+handle('peers:syncWith', async (id) => {
+  requireUnlocked();
+  const r = await peerService.exec(id, 'kst:sync-join');
+  const res = await syncEngine.enable({ method: 'peer', peer: id }, r.password);
+  audit.log('settings', { action: 'synchronisation activée', method: 'appareil lié' });
+  if (win && !win.isDestroyed()) win.webContents.send('state:changed', publicState());
+  return { result: res, state: publicState() };
+});
 handle('sync:enable', async (cfg, password) => {
   cfg = cfg || {};
   if (cfg.method === 'gdrive') {
@@ -691,7 +743,11 @@ ipcMain.on('hostkey:answer', (_e, { reqId, ok }) => {
 });
 
 // ----- Terminal -----
-handle('ssh:open', (sessionId, hostId, cols, rows) => manager.openShell(sessionId, hostId, cols, rows));
+handle('ssh:open', (sessionId, hostId, cols, rows, opts) => {
+  // Seule commande autorisée à la place du shell : rejoindre une session partagée d'un appareil lié.
+  const exec = opts && opts.attach && String(hostId).startsWith('peer:') && /^[\w:.-]{1,80}$/.test(opts.attach) ? 'kst:attach ' + opts.attach : null;
+  return manager.openShell(sessionId, hostId, cols, rows, exec ? { exec } : {});
+});
 ipcMain.on('app:activity', () => lock.activity());
 ipcMain.on('ssh:write', (_e, { sessionId, data }) => lock.locked ? undefined : localMgr.has(sessionId) ? localMgr.write(sessionId, data) : manager.write(sessionId, data));
 ipcMain.on('ssh:resize', (_e, { sessionId, cols, rows }) => { if (recorder.isRecording(sessionId)) recorder.resize(sessionId, cols, rows); }); // enregistrement
@@ -1057,7 +1113,7 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 }
-app.on('window-all-closed', () => { monitor.stop(); manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock(); app.quit(); });
+app.on('window-all-closed', () => { peerService.stop(); monitor.stop(); manager.closeAll(); localMgr.killAll(); vpnMgr.stopAll(); vault.lock(); app.quit(); });
 // Mise à jour prête mais pas appliquée : installée à la fermeture (sans relancer).
 app.on('will-quit', () => {
   if (quittingForUpdate || !updater.stageReady) return;

@@ -38,6 +38,10 @@ class SshManager {
   }
 
   hostById(id) {
+    if (typeof id === 'string' && id.startsWith('peer:')) {
+      if (!this.bridge.peerHost) throw new Error('Appareils liés indisponibles');
+      return this.bridge.peerHost(id.slice(5));
+    }
     const h = this.data.hosts.find(x => x.id === id);
     if (!h) throw new Error('Host introuvable');
     return h;
@@ -62,6 +66,10 @@ class SshManager {
       cfg.privateKey = key.privateKey;
       if (key.passphrase) cfg.passphrase = key.passphrase;
       if (host.password) cfg.password = host.password; // repli éventuel
+    } else if (auth === 'peer') {
+      // Appareil lié : clé d'identité de ce PC, jamais de mot de passe ni de question.
+      cfg.privateKey = host.privateKey;
+      cfg.tryKeyboard = false;
     } else if (auth === 'agent') {
       cfg.agent = agentPath();
       if (!cfg.agent) throw new Error('Aucun agent SSH détecté');
@@ -118,6 +126,11 @@ class SshManager {
 
       cfg.hostVerifier = (rawKey, verify) => {
         const info = keyInfo(rawKey);
+        if (host.pinnedFp) {
+          if (info.fingerprint === host.pinnedFp) return verify(true);
+          bgError = `L'empreinte de ${host.label} a changé : ce n'est peut-être pas ton appareil (refais l'appairage si tu l'as réinstallé)`;
+          return verify(false);
+        }
         const known = vault.data.knownHosts[hostKeyId];
         if (known && known.fingerprint === info.fingerprint) return verify(true);
         if (opts.background) { bgError = known ? 'Empreinte du serveur MODIFIÉE' : 'Serveur jamais connecté : ouvre-le une fois en SSH pour valider son empreinte'; return verify(false); }
@@ -159,7 +172,9 @@ class SshManager {
           let msg = err.message;
           if (err.level === 'client-authentication') msg = 'Authentification refusée (identifiant, mot de passe, clé ou code 2FA)';
           else if (/verification failed/i.test(msg)) msg = 'Clé d\'hôte refusée';
-          if (opts.background && bgError) msg = bgError;
+          if ((opts.background || host.pinnedFp) && bgError) msg = bgError;
+          else if (host.isPeer && err.level === 'client-authentication') msg = `${host.label} refuse la connexion (coffre verrouillé sur l'autre appareil, ou appairage supprimé)`;
+          else if (host.isPeer && /ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|Timed out/i.test(msg)) msg = `${host.label} injoignable (KSTermus fermé, verrouillé, ou pare-feu qui bloque le port ${cfg.port})`;
           fail(new Error(msg));
         }
       });
@@ -168,11 +183,15 @@ class SshManager {
   }
 
   // ---------- Terminal ----------
-  async openShell(sessionId, hostId, cols, rows) {
+  // opts.exec : commande lancée à la place du shell (ex. « kst:attach <id> » pour rejoindre
+  // une session partagée d'un appareil lié).
+  async openShell(sessionId, hostId, cols, rows, opts = {}) {
     const conn = await this.connect(hostId);
     const host = this.hostById(hostId);
+    const ptyOpts = { term: 'xterm-256color', cols: cols || 80, rows: rows || 24 };
+    const open = (cb) => (opts.exec ? conn.exec(opts.exec, { pty: ptyOpts }, cb) : conn.shell(ptyOpts, cb));
     return new Promise((resolve, reject) => {
-      conn.shell({ term: 'xterm-256color', cols: cols || 80, rows: rows || 24 }, (err, stream) => {
+      open((err, stream) => {
         if (err) { conn.end(); return reject(err); }
         const dec = new StringDecoder('utf8');
         const decErr = new StringDecoder('utf8');
@@ -181,7 +200,7 @@ class SshManager {
         const out = (data) => { if (data) this.bridge.emit('term:data', { sessionId, data }); };
         const startup = () => { if (host.startupCommand) stream.write(host.startupCommand.replace(/\r?\n?$/, '\n')); };
         const vs = this.bridge.vault && this.bridge.vault.isUnlocked && this.bridge.vault.isUnlocked() ? (this.bridge.vault.data.settings || {}) : {};
-        if (vs.shellIntegration !== false && host.shellIntegration !== false) {
+        if (!opts.exec && vs.shellIntegration !== false && host.shellIntegration !== false) {
           sess.inj = new Injector({
             emit: out, send: (d) => stream.write(d),
             onDone: (ok) => { sess.inj = null; this.bridge.emit('term:shell', { sessionId, integration: ok }); startup(); }

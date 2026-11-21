@@ -990,6 +990,164 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     assert.throws(() => Vault.readBackup(junk), /illisible/);
   });
 
+  console.log('Appareils liés (Windows ⇄ Mac)');
+  {
+    const { PeerService, makeSyncHub } = require('../src/main/peers');
+    const { makePaths } = require('../src/main/sftp-server');
+    const { LocalManager } = require('../src/main/local-pty');
+    const { SyncEngine } = require('../src/main/sync');
+    const ptyLib = require('@lydell/node-pty');
+    const mkDev = (name) => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-'));
+      const v = new Vault(d); v.create('Peer-Pass-2026');
+      const ev = [], notes = [];
+      const local = new LocalManager((c, p) => ev.push([c, p]));
+      const ps = new PeerService({ vault: v, local, port: 0, discovery: false, deviceName: name, userDataDir: d, emit: (c, p) => ev.push([c, p]), notify: (n) => notes.push(n),
+        spawnShell: (cols, rows) => ptyLib.spawn('bash', ['--norc', '-i'], { cols, rows, cwd: os.homedir(), env: { ...process.env, PS1: '$ ' } }) });
+      const m = new SshManager({ vault: v, emit: (c, p) => ev.push([c, p]), askHostKey: async () => false, peerHost: (id) => ps.peerHost(id) });
+      ps.connectPeer = (id) => m.connect('peer:' + id, [], { background: true });
+      const sync = new SyncEngine({ vault: v, fetch: null, deviceName: name, platform: 'linux' });
+      sync.peers = ps;
+      ps.syncHub = makeSyncHub({ vault: v, sync, dir: path.join(d, 'peer-sync') });
+      return { d, v, ev, notes, local, ps, m, sync, name };
+    };
+    const A = mkDev('MacBook'), B = mkDev('Windows'), C = mkDev('Intrus');
+    const hello = (from, to) => to.ps.onDiscovery(Buffer.from(JSON.stringify({ app: 'KSTermus', v: 1, t: 'hello', id: from.ps.identity().id, name: from.name, platform: 'linux', port: from.ps.listenPort })), { address: '127.0.0.1' });
+
+    await test('appairage : code faux refusé, 5 essais → appairage annulé', async () => {
+      const st = await A.ps.startPairing();
+      assert.ok(/^\d{6}$/.test(st.pairing.code) && A.ps.listenPort > 0);
+      const bad = st.pairing.code === '000000' ? '111111' : '000000';
+      await assert.rejects(B.ps.pairWith({ addr: '127.0.0.1', port: A.ps.listenPort, code: bad }), /Code incorrect/);
+      for (let i = 0; i < 4; i++) await B.ps.pairWith({ addr: '127.0.0.1', port: A.ps.listenPort, code: bad }).catch(() => {});
+      assert.strictEqual(A.ps.pairing, null, 'annulé après 5 échecs');
+      await assert.rejects(B.ps.pairWith({ addr: '127.0.0.1', port: A.ps.listenPort, code: st.pairing.code }), /Code incorrect|injoignable|impossible/);
+      assert.strictEqual(A.ps.peers().length + B.ps.peers().length, 0);
+    });
+    await test('appairage : bon code → les deux appareils se connaissent (clés épinglées)', async () => {
+      const st = await A.ps.startPairing();
+      const r = await B.ps.pairWith({ addr: '127.0.0.1', port: A.ps.listenPort, code: st.pairing.code });
+      assert.strictEqual(r.name, 'MacBook');
+      await sleep(50);
+      const evA = A.ev.find(e => e[0] === 'peers:paired');
+      assert.ok(/^\d{6}$/.test(r.sas) && evA && evA[1].sas === r.sas, 'même code de contrôle sur les deux écrans');
+      const { sasCode } = require('../src/main/peers');
+      assert.notStrictEqual(sasCode(A.ps.identity().pub, C.ps.identity().pub), sasCode(C.ps.identity().pub, B.ps.identity().pub), 'un intermédiaire produirait deux codes différents');
+      assert.strictEqual(A.ps.peers()[0].name, 'Windows');
+      assert.strictEqual(B.ps.state().peers[0].fingerprint, A.ps.myFp(), 'B a épinglé la clé de A');
+      assert.strictEqual(A.ps.state().peers[0].fingerprint, B.ps.myFp(), 'A a épinglé la clé de B');
+      assert.strictEqual(A.ps.pairing, null, 'code à usage unique');
+      assert.ok(A.notes.some(n => /appairé/.test(n.title)));
+      await B.ps.start(); hello(B, A);
+      assert.ok(B.ps.listenPort > 0 && A.ps.state().peers[0].port === B.ps.listenPort);
+    });
+    await test('appareil non appairé → connexion refusée', async () => {
+      C.v.data.peers = [{ ...B.v.data.peers[0] }]; // C connaît l'adresse et la clé publique de A, pas l'inverse
+      await assert.rejects(C.m.connect('peer:' + A.ps.identity().id, [], { background: true }), /refuse la connexion/);
+    });
+    await test('fichiers : SFTP vers l\'autre appareil (liste, envoi, lecture, dossier)', async () => {
+      const r = await B.m.openSftp('ps1', 'peer:' + A.ps.identity().id);
+      assert.strictEqual(r.home, os.homedir());
+      const sftp = B.m.sessions.get('ps1').sftp;
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-files-'));
+      const big = require('crypto').randomBytes(3 * 1024 * 1024);
+      fs.writeFileSync(path.join(dir, 'local.bin'), big);
+      await new Promise((res, rej) => sftp.mkdir(dir + '/sous-dossier', e => e ? rej(e) : res()));
+      await new Promise((res, rej) => sftp.fastPut(path.join(dir, 'local.bin'), dir + '/sous-dossier/copie.bin', e => e ? rej(e) : res()));
+      assert.ok(fs.readFileSync(path.join(dir, 'sous-dossier', 'copie.bin')).equals(big), 'fichier de 3 Mo identique');
+      await new Promise((res, rej) => sftp.fastGet(dir + '/sous-dossier/copie.bin', path.join(dir, 'retour.bin'), e => e ? rej(e) : res()));
+      assert.ok(fs.readFileSync(path.join(dir, 'retour.bin')).equals(big));
+      const list = await new Promise((res, rej) => sftp.readdir(dir, (e, l) => e ? rej(e) : res(l)));
+      assert.ok(list.some(x => x.filename === 'sous-dossier' && (x.attrs.mode & 0o170000) === 0o040000));
+      await new Promise((res, rej) => sftp.rename(dir + '/retour.bin', dir + '/renommé.bin', e => e ? rej(e) : res()));
+      await new Promise((res, rej) => sftp.unlink(dir + '/renommé.bin', e => e ? rej(e) : res()));
+      assert.ok(!fs.existsSync(path.join(dir, 'renommé.bin')));
+      await assert.rejects(new Promise((res, rej) => sftp.stat(dir + '/absent', e => e ? rej(e) : res())), (e) => e.code === 2);
+      B.m.close('ps1');
+    });
+    await test('chemins Windows exposés en /C:/… (racine = lecteurs)', () => {
+      const W = makePaths('win32');
+      assert.strictEqual(W.toLocal('/C:/Users/koyaja/Desktop'), 'C:\\Users\\koyaja\\Desktop');
+      assert.strictEqual(W.toLocal('/c:'), 'C:\\');
+      assert.strictEqual(W.toLocal('/'), null);
+      assert.strictEqual(W.toRemote('C:\\Users\\koyaja'), '/C:/Users/koyaja');
+      assert.strictEqual(W.resolve('.', 'C:\\Users\\koyaja'), '/C:/Users/koyaja');
+      assert.strictEqual(W.resolve('/C:/Users/../Windows', 'C:\\x'), '/C:/Windows');
+      assert.throws(() => W.toLocal('/etc/passwd'), /invalide/);
+    });
+    await test('terminal de l\'autre appareil', async () => {
+      const out = () => B.ev.filter(e => e[0] === 'term:data' && e[1].sessionId === 'pt1').map(e => e[1].data).join('');
+      await B.m.openShell('pt1', 'peer:' + A.ps.identity().id, 100, 30);
+      B.m.write('pt1', 'echo PEER_$((2+3))\r');
+      for (let i = 0; i < 40 && !out().includes('PEER_5'); i++) await sleep(100);
+      assert.ok(out().includes('PEER_5'), out());
+      assert.ok(!out().includes('KST;ready'), 'pas d\'intégration shell injectée');
+      assert.ok(A.notes.some(n => /Terminal ouvert/.test(n.title)));
+      B.m.close('pt1');
+    });
+    await test('même session sur les deux appareils (rejoindre une session locale)', async () => {
+      A.local.spawn('loc1', 'bash', 100, 30);
+      await sleep(300);
+      const sessions = await B.ps.remoteSessions(A.ps.identity().id);
+      assert.ok(sessions.some(x => x.id === 'loc1'));
+      const outB = () => B.ev.filter(e => e[0] === 'term:data' && e[1].sessionId === 'pt2').map(e => e[1].data).join('');
+      const outA = () => A.ev.filter(e => e[0] === 'term:data' && e[1].sessionId === 'loc1').map(e => e[1].data).join('');
+      A.local.write('loc1', 'echo AVANT_$((40+1))\r'); await sleep(300);
+      await B.m.openShell('pt2', 'peer:' + A.ps.identity().id, 100, 30, { exec: 'kst:attach loc1' });
+      for (let i = 0; i < 30 && !outB().includes('AVANT_41'); i++) await sleep(100);
+      assert.ok(outB().includes('AVANT_41'), 'historique de la session rejouée');
+      B.m.write('pt2', 'echo PARTAGE_$((40+2))\r');
+      for (let i = 0; i < 30 && !outA().includes('PARTAGE_42'); i++) await sleep(100);
+      assert.ok(outA().includes('PARTAGE_42') && outB().includes('PARTAGE_42'), 'tapé sur B, vu sur A et B');
+      A.local.write('loc1', 'echo DEPUIS_A_$((7*6))\r');
+      for (let i = 0; i < 30 && !outB().includes('DEPUIS_A_42'); i++) await sleep(100);
+      assert.ok(outB().includes('DEPUIS_A_42'), 'tapé sur A, vu sur B');
+      assert.strictEqual(A.local.list()[0].viewers, 1);
+      A.local.kill('loc1');
+      for (let i = 0; i < 30 && !B.ev.some(e => e[0] === 'term:exit' && e[1].sessionId === 'pt2'); i++) await sleep(100);
+      assert.ok(B.ev.some(e => e[0] === 'term:exit' && e[1].sessionId === 'pt2'), 'fin de session propagée');
+    });
+    await test('hosts et réglages synchronisés directement entre les deux appareils', async () => {
+      A.v.data.hosts.push({ id: 'ha', label: 'Serveur du Mac', hostname: '10.0.0.1', port: 22, username: 'root', updatedAt: '2026-11-21T10:00:00Z' });
+      B.v.data.hosts.push({ id: 'hb', label: 'Serveur du Windows', hostname: '10.0.0.2', port: 22, username: 'root', updatedAt: '2026-11-21T10:00:00Z' });
+      A.v.save(); B.v.save();
+      const r = await B.ps.exec(A.ps.identity().id, 'kst:sync-join');
+      assert.ok(r.password && A.v.data.sync.method === 'peerhub');
+      await B.sync.enable({ method: 'peer', peer: A.ps.identity().id }, r.password);
+      assert.deepStrictEqual(B.v.data.hosts.map(h => h.label).sort(), ['Serveur du Mac', 'Serveur du Windows']);
+      await A.sync.syncNow();
+      assert.deepStrictEqual(A.v.data.hosts.map(h => h.label).sort(), ['Serveur du Mac', 'Serveur du Windows']);
+      B.v.data.hosts.find(h => h.id === 'ha').label = 'Mac (renommé sur Windows)'; B.v.data.hosts.find(h => h.id === 'ha').updatedAt = '2026-11-21T11:00:00Z'; B.v.save();
+      await B.sync.syncNow(); await sleep(400);
+      assert.ok(A.v.data.hosts.some(h => h.label === 'Mac (renommé sur Windows)'), 'l\'hôte se resynchronise après une écriture');
+      assert.ok(!JSON.stringify(B.v.data.sync).includes(r.password) || !B.v.data.sync.hubPassword, 'mot de passe généré seulement côté hôte');
+      assert.strictEqual(B.sync.status().where, 'Appareil lié › MacBook');
+    });
+    await test('empreinte épinglée : clé différente → refus clair', async () => {
+      const real = B.v.data.peers[0].pub;
+      B.v.data.peers[0].pub = C.ps.identity().pub;
+      await assert.rejects(B.m.connect('peer:' + A.ps.identity().id, [], { background: true }), /empreinte .* a changé/);
+      B.v.data.peers[0].pub = real;
+    });
+    await test('coffre verrouillé sur l\'autre appareil → refus', async () => {
+      A.ps.isLocked = () => true;
+      await assert.rejects(B.m.connect('peer:' + A.ps.identity().id, [], { background: true }), /refuse la connexion/);
+      A.ps.isLocked = () => false;
+    });
+    await test('coffre restauré sur un autre PC → nouvelle identité, appairages oubliés', () => {
+      const oldId = A.ps.identity().id;
+      const moved = new PeerService({ vault: A.v, port: 0, discovery: false, userDataDir: A.d + '-autre-pc' });
+      assert.notStrictEqual(moved.identity().id, oldId);
+      assert.strictEqual(A.v.data.peers.length, 0);
+    });
+    await test('oublier un appareil → il ne peut plus se connecter', async () => {
+      B.ps.unpair(A.v.data.device ? B.v.data.peers[0].id : '');
+      assert.strictEqual(B.ps.peers().length, 0);
+      assert.throws(() => B.ps.peerHost('x'), /non appairé/);
+    });
+    for (const X of [A, B, C]) { X.ps.stop(); X.m.closeAll(); X.local.killAll(); }
+  }
+
   console.log('Mises à jour');
   const { Updater, signManifest, verifyManifest, cmpVersion, SWAP_PS1, EXTRACT_PS1 } = require('../src/main/updater');
   const crypto = require('crypto');

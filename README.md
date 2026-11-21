@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.15.1** · Windows, Linux et **macOS**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.16.0** · Windows, Linux et **macOS**
 
 ---
 
@@ -28,6 +28,7 @@
    - [Synchronisation entre PC](#synchronisation-entre-pc)
    - [Known hosts](#known-hosts)
    - [Verrouillage et Windows Hello](#verrouillage-et-windows-hello)
+   - [Appareils liés (Windows ⇄ Mac)](#appareils-liés-windows--mac)
    - [Intégration shell](#intégration-shell)
    - [Recherche dans le terminal](#recherche-dans-le-terminal)
    - [Mises à jour automatiques](#mises-à-jour-automatiques)
@@ -67,6 +68,7 @@
 | **Keychain** | Import OpenSSH / PEM / PuTTY `.ppk`, génération ed25519 / RSA 4096, export, copie de la clé publique |
 | **VPN WireGuard** | Profils `.conf` importés, associés à un **host ou un groupe**, démarrés automatiquement à la connexion ; tunnel en espace utilisateur (aucun droit admin, aucune route système), plusieurs VPN en parallèle |
 | **Tableau de bord** | Serveurs surveillés par SSH **sans agent** : CPU, RAM, swap, disques, charge, réseau, services (systemd ou processus), conteneurs Docker, courbes ~2 h ; alertes (disque plein, RAM, charge, service arrêté, serveur injoignable) avec **notification système** |
+| **Appareils liés** | Windows ⇄ Mac (ou Linux) sur le même réseau : **fichiers et dossiers copiés** de l'un à l'autre (SFTP double panneau, glisser-déposer), **terminal de l'autre PC**, **même session sur les deux** en direct, **hosts et réglages identiques** sans cloud ; appairage unique par code + code de contrôle, connexion chiffrée par clés |
 | **Intégration shell** | bash / zsh en SSH, **sans rien installer** : marque verte / rouge + code de retour et durée de chaque commande, **dossier courant** suivi (SFTP et éditeur s'y ouvrent, retour au même dossier après reconnexion), notification quand une commande longue se termine |
 | **Tunnels** | Local `-L`, distant `-R`, dynamique SOCKS5 `-D`, démarrage / arrêt, état en direct |
 | **Synchronisation** | Coffre **chiffré** partagé entre tes PC (Windows ↔ Linux) via **Google Drive en connexion directe**, un dossier cloud ou un dépôt GitHub privé ; fusion automatique, conflits résolus |
@@ -339,6 +341,29 @@ La liste des empreintes acceptées. Si l'empreinte d'un serveur change, la conne
 - **Tout fermer** : 🔒 ▸ *Tout fermer et verrouiller le coffre*, ou le lien sous le formulaire de l'écran verrouillé (deux clics). Les sessions sont fermées et la clé est effacée de la mémoire.
 - *Écran + démarrage* garde la clé du coffre dans `%APPDATA%\KSTermus\hello.kst`, chiffrée par **DPAPI** (liée à ta session Windows) et libérée seulement après Hello. Changer le mot de passe maître met ce fichier à jour ; *Désactivé* le supprime.
 
+### Appareils liés (Windows ⇄ Mac)
+
+Menu **🔗 Appareils**. Relie deux KSTermus du **même réseau** (même Wi-Fi / box), par exemple ton PC Windows et ton MacBook.
+
+**Appairage (une seule fois)**
+1. Sur le Mac : **+ Appairer un appareil** → un code à 6 chiffres s'affiche (valable 3 min, usage unique).
+2. Sur le Windows : le Mac apparaît dans **Sur ce réseau** → **Appairer** → tape le code. Si rien n'apparaît, utilise **Appairer par adresse IP…** (IP et port affichés sur le Mac).
+3. Les deux écrans affichent un **code de contrôle** : vérifie qu'il est identique, puis **Identique**. S'il diffère, quelqu'un s'est intercalé sur le réseau : **Différent : annuler**.
+4. Au premier lancement, autorise KSTermus dans le pare-feu (Windows : « Réseaux privés » ; macOS : « Autoriser les connexions entrantes »).
+
+**Ensuite, depuis la carte de l'autre appareil**
+- **📁 Fichiers** : fichiers de l'autre PC dans l'onglet SFTP double panneau (bouton **Panneau PC**) : glisser-déposer, dossiers entiers, file d'attente, conflits (remplacer / ignorer / renommer). Sur Windows, les lecteurs apparaissent en `/C:/`, `/D:/`… (`/` = liste des lecteurs).
+- **>_ Terminal** : un terminal qui tourne sur l'autre PC (PowerShell sur Windows, zsh sur le Mac), comme une session SSH, sans rien configurer.
+- **⧉ Sessions** : liste des terminaux locaux ouverts sur l'autre PC → **Rejoindre** : la même session s'affiche sur les deux écrans, on peut taper des deux côtés (l'autre PC reçoit une notification).
+- **⇅** : synchronise les hosts, clés, snippets, tunnels, VPN et réglages entre les deux PC (fusion, rien n'est supprimé), en direct sur le réseau, chiffré, sans Google Drive ni GitHub. Vérification chaque minute.
+- **🗑** : oublier l'appareil (il ne peut plus se connecter).
+
+**Sécurité**
+- Chaque appareil a sa propre clé (ed25519) ; après l'appairage, seuls les appareils appairés entrent, et chacun vérifie la clé de l'autre (empreinte épinglée).
+- Le port (47390, ou un port libre) n'est ouvert que si au moins un appareil est appairé ou qu'un appairage est en cours, et peut être fermé à tout moment (**Accepter les connexions**).
+- Rien n'est accepté tant que le coffre est verrouillé ou l'écran de verrouillage affiché. Chaque accès (fichiers, terminal, session rejointe) est noté au journal d'audit et signalé par une notification.
+- 5 codes faux → appairage annulé. Un coffre restauré sur un autre PC reçoit une nouvelle identité (les appairages sont à refaire).
+
 ### Intégration shell
 
 Active par défaut pour les sessions SSH dont le shell est **bash** ou **zsh** (icône ⚡ dans la barre du terminal).
@@ -610,6 +635,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.16.0** | **Appareils liés** (Windows ⇄ Mac, même réseau) : copie de fichiers et de dossiers entre les deux PC, terminal de l'autre PC, même session sur les deux, hosts et réglages synchronisés en direct ; appairage par code + code de contrôle |
 | **1.15.1** | Cartes de hosts sous Windows : icônes au trait identiques sur tous les systèmes, bouton Supprimer plus jamais coupé, type d'authentification à côté de l'adresse |
 | **1.15.0** | **Intégration shell** bash / zsh en SSH (sans rien installer) : statut, code et durée de chaque commande, dossier courant (SFTP / éditeur / reconnexion), notification des commandes longues |
 | **1.14.0** | **Tableau de bord des serveurs** : surveillance sans agent par SSH (CPU, RAM, disques, charge, réseau, services, Docker), courbes, alertes et notifications système, ligne de métriques sur les cartes |

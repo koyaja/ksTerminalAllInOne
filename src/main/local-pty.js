@@ -85,14 +85,16 @@ class LocalManager {
       name: 'xterm-256color', cols: Math.max(2, cols || 80), rows: Math.max(2, rows || 24), cwd: dir, env,
       useConpty: true
     });
-    const s = { proc, shell: { id: sh.id, name: sh.name, icon: sh.icon }, buffer: '', attached: true, title: sh.name, createdAt: Date.now(), cwd: dir };
+    const s = { proc, shell: { id: sh.id, name: sh.name, icon: sh.icon }, buffer: '', attached: true, title: sh.name, createdAt: Date.now(), cwd: dir, watchers: new Set() };
     this.sessions.set(id, s);
     proc.onData(d => {
       s.buffer += d;
       if (s.buffer.length > BUFFER_MAX) s.buffer = s.buffer.slice(-BUFFER_MAX);
       if (s.attached) this.emit('term:data', { sessionId: id, data: d });
+      for (const w of s.watchers) w.data(d);
     });
     proc.onExit(({ exitCode }) => {
+      for (const w of s.watchers) w.exit();
       if (!this.sessions.has(id)) return;
       this.sessions.delete(id);
       this.emit('term:exit', { sessionId: id, reason: `Processus terminé (code ${exitCode})`, local: true });
@@ -122,16 +124,26 @@ class LocalManager {
     return { buffer: s.buffer, shell: s.shell, title: s.title };
   }
 
+  // Spectateur supplémentaire d'une session (appareil lié qui la rejoint) : reçoit la sortie en direct.
+  watch(id, onData, onExit) {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error('Session locale terminée');
+    const w = { data: onData, exit: onExit };
+    s.watchers.add(w);
+    return { buffer: s.buffer, title: s.title, unwatch: () => s.watchers.delete(w) };
+  }
+
   kill(id) {
     const s = this.sessions.get(id);
     if (!s) return;
+    for (const w of s.watchers) w.exit();
     this.sessions.delete(id);
     try { s.proc.kill(); } catch { /* déjà terminé */ }
     this.emit('local:changed', {});
   }
 
   list() {
-    return [...this.sessions.entries()].map(([id, s]) => ({ id, shell: s.shell, title: s.title, attached: s.attached, createdAt: s.createdAt, pid: s.proc.pid, cwd: s.cwd }));
+    return [...this.sessions.entries()].map(([id, s]) => ({ id, shell: s.shell, title: s.title, attached: s.attached, createdAt: s.createdAt, pid: s.proc.pid, cwd: s.cwd, viewers: s.watchers.size }));
   }
 
   killAll() { for (const id of [...this.sessions.keys()]) this.kill(id); }

@@ -577,3 +577,17 @@ td.crit { color: var(--danger); font-weight: 700; } td.warn { color: var(--warn)
 .grid { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
 .card-top > div { overflow: hidden; }
 .card-sub-row { flex-wrap: wrap; row-gap: 3px; }
+
+/* ---------- 1.16.0 : appareils liés ---------- */
+.peer-me { display: flex; align-items: center; gap: 14px; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 8px; }
+.peer-me .row-title { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.peer-avatar { background: var(--bg-4); font-size: 20px; color: inherit; }
+.peer-avatar.big { width: 44px; height: 44px; font-size: 24px; }
+.peer-card.offline { opacity: .7; }
+.peer-card .card-title { display: flex; align-items: center; gap: 8px; }
+.pair-code { font-family: var(--mono); font-size: 40px; font-weight: 700; letter-spacing: .12em; text-align: center; padding: 14px 0 6px; color: var(--accent); }
+.pair-input { font-family: var(--mono); font-size: 22px; letter-spacing: .15em; text-align: center; }
+.peer-hint { padding: 10px 2px; line-height: 1.6; }
+.peer-hint a { color: var(--accent); }
+.active-peer .not-peer { display: none; }
+.pair-code.sas { color: var(--text); font-size: 34px; }

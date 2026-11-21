@@ -242,7 +242,7 @@
 
   function showApp() {
     $('#lock').hidden = true; $('#app').hidden = false; activateTab('home');
-    loadMonSnapshot();
+    loadMonSnapshot(); loadPeers();
     api.invoke('local:shells').then(list => { ui.shells = list || []; if (ui.section === 'local') renderSection(); }).catch(() => {});
   }
 
@@ -447,12 +447,12 @@
     const el = $('#section');
     el.replaceChildren(({
       hosts: viewHosts, keychain: viewKeychain, snippets: viewSnippets,
-      forwards: viewForwards, vpn: viewVpn, audit: viewAudit, dashboard: viewDashboard, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal
+      forwards: viewForwards, vpn: viewVpn, audit: viewAudit, dashboard: viewDashboard, known: viewKnown, settings: viewSettings, history: viewHistory, local: viewLocal, peers: viewPeers
     })[ui.section]());
   }
 
   // ---------- Hosts ----------
-  const hostById = (id) => S.hosts.find(x => x.id === id);
+  const hostById = (id) => S.hosts.find(x => x.id === id) || peerAsHost(id);
   const initials = (s) => (s || '?').replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
 
   function viewHosts() {
@@ -856,6 +856,153 @@
   }
 
   // ---------- Known hosts ----------
+  // ---------- Appareils liés (Windows ⇄ Mac, même réseau) ----------
+  let PEERS = null;
+  const OS_ICON = { darwin: '🍎', win32: '🪟', linux: '🐧' };
+  const OS_NAME = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
+  function peerAsHost(id) {
+    if (typeof id !== 'string' || !id.startsWith('peer:') || !PEERS || !PEERS.peers) return null;
+    const p = PEERS.peers.find(x => x.id === id.slice(5));
+    return p ? { id, label: p.name, username: OS_NAME[p.platform] || p.platform, hostname: p.addr || '?', port: p.port, isPeer: true, color: '#7aa2f7', group: '' } : null;
+  }
+  async function loadPeers() { const st = await api.invoke('peers:state').catch(() => null); if (st && !st.locked) { PEERS = st; if (ui.section === 'peers') renderSection(); } }
+  let pairModalClose = null;
+  async function startPairingUi() {
+    const st = await guard(() => api.invoke('peers:pairStart'));
+    if (!st || !st.pairing) return;
+    PEERS = st;
+    const codeEl = h('div', { class: 'pair-code', text: st.pairing.code.replace(/(\d{3})(\d{3})/, '$1 $2') });
+    const left = h('div', { class: 'muted small' });
+    const tick = () => { const s2 = Math.max(0, Math.round((st.pairing.expiresAt - Date.now()) / 1000)); left.textContent = `Expire dans ${Math.floor(s2 / 60)}:${String(s2 % 60).padStart(2, '0')}`; if (!s2) clearInterval(iv); };
+    const iv = setInterval(tick, 1000); tick();
+    await modal({
+      title: 'Appairer un appareil',
+      onOpen: (form) => { pairModalClose = () => { const b = form.querySelector('footer button'); if (b) b.click(); }; },
+      body: [
+        h('p', { text: `Sur l'autre PC (même réseau), ouvre KSTermus ▸ 🔗 Appareils, clique « ${PEERS.me.name} » puis tape ce code :` }),
+        codeEl, left,
+        h('p', { class: 'muted small', text: 'Le code ne sert qu\'une fois. Ensuite les deux appareils se reconnaissent automatiquement (connexion chiffrée, clés vérifiées).' })
+      ],
+      actions: [{ label: 'Fermer', value: null }]
+    });
+    clearInterval(iv); pairModalClose = null;
+    if (PEERS && PEERS.pairing) { const s3 = await api.invoke('peers:pairCancel').catch(() => null); if (s3) PEERS = s3; }
+    if (ui.section === 'peers') renderSection();
+  }
+  async function pairWithUi(target) {
+    const code = h('input', { placeholder: '123 456', inputmode: 'numeric', autocomplete: 'off', class: 'pair-input', maxlength: '7' });
+    const addr = target ? null : h('input', { placeholder: '192.168.1.20' });
+    const port = target ? null : h('input', { value: '47390', style: { width: '90px' } });
+    const r = await modal({
+      title: target ? `Appairer avec ${target.name}` : 'Appairer par adresse IP',
+      body: [
+        target ? h('p', { text: `Sur ${target.name}, clique « Appairer un appareil » : un code à 6 chiffres s'affiche. Tape-le ici.` })
+          : h('div', { class: 'form-row' }, field('Adresse IP de l\'autre PC', addr), field('Port', port)),
+        field('Code affiché sur l\'autre PC', code)
+      ],
+      actions: [{ label: 'Annuler', value: null }, { label: 'Appairer', class: 'primary', submit: true, onClick: async () => {
+        const c = code.value.replace(/\s/g, '');
+        const res = await guard(() => api.invoke('peers:pair', target ? { id: target.id, code: c } : { addr: addr.value.trim(), port: Number(port.value) || 47390, code: c }));
+        return res || false;
+      } }]
+    });
+    if (r) { PEERS = r.state; renderSection(); verifySasUi(r.paired); }
+  }
+  // Vérification visuelle : les deux écrans doivent afficher le même code de contrôle.
+  async function verifySasUi(p) {
+    const ok = await modal({
+      title: `✓ Appairé avec ${p.name}`,
+      body: [
+        h('p', { text: `Vérifie que ${p.name} affiche exactement le même code de contrôle :` }),
+        h('div', { class: 'pair-code sas', text: String(p.sas).replace(/(\d{3})(\d{3})/, '$1 $2') }),
+        h('p', { class: 'muted small', text: 'Codes différents = quelqu\'un s\'est intercalé sur le réseau : annule, l\'appareil est aussitôt oublié.' })
+      ],
+      actions: [{ label: 'Différent : annuler', class: 'danger', value: false }, { label: 'Identique', class: 'primary', value: true }]
+    });
+    if (ok === false) { const st = await guard(() => api.invoke('peers:unpair', p.id)); if (st) { PEERS = st; renderSection(); } toast('Appairage annulé', true); }
+    else toast(`✓ ${p.name} est relié à ce PC`);
+  }
+  async function remoteSessionsUi(p) {
+    const list = await guard(() => api.invoke('peers:sessions', p.id));
+    if (!list) return;
+    const pick = await modal({
+      title: `Sessions ouvertes sur ${p.name}`, wide: true,
+      body: list.length ? h('div', { class: 'list' }, list.map(x => h('div', { class: 'row' },
+        h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: `${x.shell && x.shell.icon ? x.shell.icon + ' ' : ''}${x.title}` }), h('div', { class: 'muted small', text: `${x.cwd || ''} · ouverte à ${new Date(x.createdAt).toLocaleTimeString('fr-FR')}` })),
+        h('button', { type: 'button', class: 'btn primary sm', onclick: (e) => { e.currentTarget.closest('.modal').querySelector('footer button').dataset.pick = x.id; e.currentTarget.closest('.modal').querySelector('footer button').click(); } }, 'Rejoindre'))))
+        : h('div', { class: 'empty', text: `Aucune session locale ouverte sur ${p.name}. Ouvre un terminal local là-bas (menu Local) : il apparaîtra ici.` }),
+      actions: [{ label: 'Fermer', value: null }],
+      onOpen: (form) => { const b = form.querySelector('footer button'); b.addEventListener('click', () => { if (b.dataset.pick) { const x = list.find(y => y.id === b.dataset.pick); setTimeout(() => openTermTab({ type: 'ssh', hostId: 'peer:' + p.id, attach: x.id, title: `${x.title} (${p.name})` }), 0); } }, true); }
+    });
+    return pick;
+  }
+  async function syncWithPeerUi(p) {
+    const st = await api.invoke('sync:status').catch(() => ({}));
+    const msg = st.enabled && st.method !== 'peer'
+      ? `Ce PC synchronise déjà via ${st.where}. Passer à une synchronisation directe avec ${p.name} ? (les hosts des deux PC sont fusionnés, rien n'est supprimé)`
+      : `Les hosts, clés, snippets, tunnels, VPN et réglages de ce PC et de ${p.name} seront fusionnés puis gardés identiques (chiffré, en direct sur ton réseau, sans cloud). Rien n'est supprimé.`;
+    if (!(await confirmBox('Synchroniser avec ' + p.name, msg, 'Synchroniser'))) return;
+    const r = await guard(() => api.invoke('peers:syncWith', p.id));
+    if (r) { setState(r.state); toast(`✓ Synchronisé avec ${p.name} : ${r.result.fromRemote} élément(s) reçu(s), ${r.result.fromLocal} envoyé(s)`); }
+  }
+  function peerCard(p, syncSt) {
+    const online = p.online;
+    return h('div', { class: 'card peer-card' + (online ? '' : ' offline') },
+      h('div', { class: 'card-top' },
+        h('div', { class: 'avatar peer-avatar', text: OS_ICON[p.platform] || '💻' }),
+        h('div', { style: { minWidth: 0, flex: 1 } },
+          h('div', { class: 'card-title' }, h('span', { text: p.name }), h('span', { class: 'dot ' + (online ? 'on' : 'off'), title: online ? 'En ligne' : 'Hors ligne' })),
+          h('div', { class: 'card-sub', text: `${OS_NAME[p.platform] || p.platform || ''}${p.addr ? ' · ' + p.addr : ''}${online ? '' : ' · hors ligne'}` }),
+          syncSt && syncSt.enabled && syncSt.method === 'peer' && syncSt.peer === p.id ? h('div', { class: 'card-mon', text: `⇅ hosts synchronisés${syncSt.lastSync ? ' · ' + new Date(syncSt.lastSync).toLocaleTimeString('fr-FR') : ''}` }) : null)),
+      h('div', { class: 'card-actions' },
+        h('button', { class: 'btn primary sm', disabled: !online, title: 'Fichiers de ' + p.name + ' (copier, glisser-déposer, dossiers entiers)', onclick: () => openSftp('peer:' + p.id) }, '📁 Fichiers'),
+        h('button', { class: 'btn sm', disabled: !online, title: 'Terminal qui tourne sur ' + p.name, onclick: () => openTerminal('peer:' + p.id) }, '>_ Terminal'),
+        h('button', { class: 'btn sm', disabled: !online, title: 'Rejoindre une session ouverte sur ' + p.name, onclick: () => remoteSessionsUi(p) }, '⧉ Sessions'),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'icon-btn ci', disabled: !online, title: 'Synchroniser les hosts et réglages avec ' + p.name, onclick: () => syncWithPeerUi(p) }, '⇅'),
+        h('button', { class: 'icon-btn ci ci-danger', title: 'Oublier cet appareil', onclick: async () => {
+          if (!(await confirmBox('Oublier ' + p.name, `${p.name} ne pourra plus accéder à ce PC. Pour le reconnecter il faudra refaire l'appairage.`, 'Oublier'))) return;
+          const st2 = await guard(() => api.invoke('peers:unpair', p.id)); if (st2) { PEERS = st2; renderSection(); }
+        } }, ico('trash'))));
+  }
+  function viewPeers() {
+    if (!PEERS) { loadPeers(); return h('div', {}, h('div', { class: 'section-head' }, h('h1', { text: 'Appareils liés' })), h('div', { class: 'empty', text: 'Chargement…' })); }
+    const me = PEERS.me;
+    const syncSt = ui.peerSync || null;
+    api.invoke('sync:status').then(x => { if (JSON.stringify(x) !== JSON.stringify(ui.peerSync)) { ui.peerSync = x; if (ui.section === 'peers') renderSection(); } }).catch(() => {});
+    const head = h('div', { class: 'section-head' }, h('h1', { text: 'Appareils liés' }),
+      h('button', { class: 'btn', title: 'Rechercher les appareils du réseau', onclick: async () => { const st = await api.invoke('peers:refresh').catch(() => null); if (st) { PEERS = st; renderSection(); } } }, '⟳'),
+      h('button', { class: 'btn primary', onclick: () => startPairingUi() }, '+ Appairer un appareil'));
+    const meCard = h('div', { class: 'peer-me' },
+      h('div', { class: 'avatar peer-avatar big', text: OS_ICON[me.platform] || '💻' }),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div', { class: 'row-title' }, h('span', { text: 'Ce PC : ' + me.name }),
+          h('button', { class: 'icon-btn ci', title: 'Renommer ce PC', onclick: async () => {
+            const inp = h('input', { value: me.name });
+            const ok = await modal({ title: 'Nom de ce PC', body: [field('Nom affiché sur tes autres appareils', inp)], actions: [{ label: 'Annuler', value: false }, { label: 'Enregistrer', class: 'primary', submit: true, value: true }] });
+            if (ok) { const st = await guard(() => api.invoke('peers:rename', inp.value)); if (st) { PEERS = st; renderSection(); } }
+          } }, ico('edit'))),
+        h('div', { class: 'muted small', text: me.running ? `Visible sur le réseau · ${me.addresses.join(', ') || 'aucune adresse'} · port ${me.port}` : 'Invisible tant qu\'aucun appareil n\'est appairé (ou désactivé dans les réglages)' })),
+      h('label', { class: 'check', title: 'Désactivé : ce PC n\'accepte plus aucune connexion d\'appareil lié' }, checkbox(S.settings.peerEnabled !== false, async (c) => { const st = await guard(() => api.invoke('settings:save', { peerEnabled: c.checked })); if (st) S = st; setTimeout(loadPeers, 400); }), 'Accepter les connexions'));
+    const paired = PEERS.peers;
+    const disc = PEERS.discovered;
+    return h('div', {}, head, meCard,
+      h('div', { class: 'group-title', text: `Appareils appairés · ${paired.length}` }),
+      paired.length ? h('div', { class: 'grid' }, paired.map(p => peerCard(p, syncSt)))
+        : h('div', { class: 'empty' }, h('div', { text: 'Aucun appareil appairé.' }), h('div', { class: 'muted small', text: 'Relie ton Mac et ton PC Windows : fichiers et dossiers copiés de l\'un à l\'autre, terminal de l\'autre PC, sessions partagées en direct, hosts et réglages identiques. Les deux doivent être sur le même réseau (Wi-Fi / box).' })),
+      h('div', { class: 'group-title', text: `Sur ce réseau · ${disc.length}` }),
+      disc.length ? h('div', { class: 'grid' }, disc.map(d => h('div', { class: 'card' },
+        h('div', { class: 'card-top' }, h('div', { class: 'avatar peer-avatar', text: OS_ICON[d.platform] || '💻' }),
+          h('div', { style: { minWidth: 0, flex: 1 } }, h('div', { class: 'card-title', text: d.name }), h('div', { class: 'card-sub', text: `${OS_NAME[d.platform] || d.platform || ''} · ${d.addr}` }))),
+        h('div', { class: 'card-actions' }, h('button', { class: 'btn primary sm', onclick: () => pairWithUi(d) }, 'Appairer'), h('span', { class: 'spacer' })))))
+        : h('div', { class: 'muted small peer-hint' },
+          'Aucun autre KSTermus visible. Sur l\'autre PC : ouvre KSTermus, déverrouille-le et clique « Appairer un appareil » (il devient alors visible). Même réseau requis ; au premier lancement, autorise KSTermus dans le pare-feu (Windows : « Réseaux privés »). ',
+          h('a', { href: '#', onclick: (e) => { e.preventDefault(); pairWithUi(null); } }, 'Appairer par adresse IP…')));
+  }
+  api.on('peers:update', (st) => { PEERS = st; if (ui.section === 'peers' && ui.activeTab === 'home' && !document.querySelector('.backdrop')) renderSection(); });
+  api.on('peers:paired', (p) => { if (pairModalClose) pairModalClose(); setTimeout(() => verifySasUi(p), 150); });
+  api.on('peers:notice', (n) => toast(`🔗 ${n.title} — ${n.body}`));
+
   // ---------- Tableau de bord (surveillance) ----------
   const MON = {};            // hostId -> { last, history[], alerts[] }
   function fmtUptime(sec) { if (!sec) return '—'; const d = Math.floor(sec / 86400), hh = Math.floor(sec % 86400 / 3600), mm = Math.floor(sec % 3600 / 60); return d ? `${d} j ${hh} h` : hh ? `${hh} h ${mm} min` : `${mm} min`; }
@@ -1345,7 +1492,7 @@
   function syncInfo(st) {
     if (!st || !st.enabled) return [h('div', { class: 'muted small', text: 'Désactivée. Hosts, clés, snippets, tunnels, VPN et réglages restent sur ce PC.' })];
     return [
-      h('div', { class: 'small', text: `${st.method === 'github' ? '🐙 GitHub' : st.method === 'gdrive' ? '🟢' : '📁 Dossier'} : ${st.where}` }),
+      h('div', { class: 'small', text: `${st.method === 'github' ? '🐙 GitHub' : st.method === 'gdrive' ? '🟢' : st.method === 'peer' || st.method === 'peerhub' ? '🔗' : '📁 Dossier'} : ${st.where}` }),
       h('div', { class: 'small' + (st.lastError ? ' err-text' : ''), text: st.lastError ? '⚠ ' + st.lastError : `Dernière synchro : ${ago(st.lastSync)}` + (st.lastStats && st.lastStats.conflicts ? ` · ${st.lastStats.conflicts} conflit(s) résolu(s)` : '') }),
       st.devices && st.devices.length ? h('div', { class: 'muted small', text: 'PC : ' + st.devices.map(d => `${d.name}${d.id === st.deviceId ? ' (ce PC)' : ''} — ${ago(d.lastSync)}`).join(' · ') }) : null
     ];
@@ -1781,7 +1928,7 @@
     const bar = h('div', { class: 'session-bar' }, info, h('span', { class: 'spacer' }),
       splitR, splitD, bcBtn, snipBtn,
       h('button', { class: 'btn sm', title: 'Sauvegarder cette disposition comme espace de travail', onclick: () => saveWorkspace(t) }, '💾'),
-      h('button', { class: 'btn sm ssh-only', title: 'Ouvrir et éditer un fichier du serveur (normal ou sudo)', onclick: sshOnly(p => promptOpenFile(p.spec.hostId, p.cwd)) }, '📝 Éditer'),
+      h('button', { class: 'btn sm ssh-only not-peer', title: 'Ouvrir et éditer un fichier du serveur (normal ou sudo)', onclick: sshOnly(p => promptOpenFile(p.spec.hostId, p.cwd)) }, '📝 Éditer'),
       h('button', { class: 'btn sm ssh-only', title: 'SFTP sur le host du panneau actif (ouvert dans le dossier courant du terminal)', onclick: sshOnly(p => openSftp(p.spec.hostId, p.cwd)) }, '📁 SFTP'));
     const el = h('div', { class: 'session' }, bar, h('div', { class: 'term-area' }, body));
     $('#sessions').append(el);
@@ -1839,7 +1986,7 @@
     const host = isLocal ? null : hostById(spec.hostId);
     const shell = isLocal ? shellById(spec.shellId) : null;
     const id = isLocal && spec.attachId ? spec.attachId : uid();
-    const title0 = isLocal ? (shell ? shell.name : 'Terminal local') : host.label;
+    const title0 = isLocal ? (shell ? shell.name : 'Terminal local') : spec.title || host.label;
     const sub0 = isLocal ? 'local' : `${host.username}@${host.hostname}`;
     const termHost = h('div', { class: 'term-host' });
     const wrap = h('div', { class: 'term-wrap' }, termHost);
@@ -1989,7 +2136,7 @@
       clearRetry();
       setPaneStatus('wait');
       if (opts.auto) term.write(`\r\n\x1b[90m--- reconnexion automatique (tentative ${p.retry.attempt}) ---\x1b[0m\r\n`);
-      overlay(wrap, [h('div', { class: 'spinner' }), h('div', { text: isLocal ? `Démarrage de ${title0}…` : `Connexion à ${host.username}@${host.hostname}${host.jumpHostId && hostById(host.jumpHostId) ? ' via ' + hostById(host.jumpHostId).label : ''}…` })]);
+      overlay(wrap, [h('div', { class: 'spinner' }), h('div', { text: isLocal ? `Démarrage de ${title0}…` : host.isPeer ? `Connexion à ${host.label}${spec.attach ? ' (session partagée)' : ''}…` : `Connexion à ${host.username}@${host.hostname}${host.jumpHostId && hostById(host.jumpHostId) ? ' via ' + hostById(host.jumpHostId).label : ''}…` })]);
       await new Promise(r => requestAnimationFrame(r));
       try { fitAddon.fit(); } catch { /* ignore */ }
       try {
@@ -2005,14 +2152,14 @@
           titleEl.textContent = r.shell.name;
           p.title = r.shell.name;
         } else {
-          await api.invoke('ssh:open', id, spec.hostId, term.cols, term.rows);
+          await api.invoke('ssh:open', id, spec.hostId, term.cols, term.rows, spec.attach ? { attach: spec.attach } : undefined);
         }
         if (!panes.has(id)) { if (!p.detached) api.invoke('ssh:close', id); return; }
         p.cols = term.cols; p.rows = term.rows;
         overlay(wrap, null);
         setPaneStatus('on');
         if (opts.auto) toast(`✓ ${title0} reconnecté`);
-        if (opts.auto && !isLocal && p.cwd && p.cwd !== '/') api.write(id, ` cd '${p.cwd.replace(/'/g, "'\\''")}'\r`);
+        if (opts.auto && !isLocal && !spec.attach && p.cwd && p.cwd !== '/') api.write(id, ` cd '${p.cwd.replace(/'/g, "'\\''")}'\r`);
         p.retry.attempt = 0;
         p.fit();
         if (t.activePane === id && ui.activeTab === t.id) term.focus();
@@ -2317,6 +2464,7 @@
     const p = t.panes.get(t.activePane);
     const host = p && !p.isLocal && hostById(p.hostId);
     t.el.classList.toggle('active-local', !!(p && p.isLocal));
+    t.el.classList.toggle('active-peer', !!(p && !p.isLocal && String(p.spec.hostId || '').startsWith('peer:')));
     if (p && p.isLocal) {
       const sh = shellById(p.spec.shellId);
       t.info.replaceChildren(...[
@@ -2332,7 +2480,7 @@
     t.info.replaceChildren(...(host ? [
       h('span', { class: 'avatar', style: { width: '22px', height: '22px', fontSize: '10px', borderRadius: '6px', background: host.color || COLORS[0] }, text: initials(host.label) }),
       h('span', { class: 'title', text: host.label }),
-      h('span', { class: 'sub', text: `${host.username}@${host.hostname}:${host.port}` }),
+      h('span', { class: 'sub', text: host.isPeer ? `🔗 appareil lié · ${host.username} · ${host.hostname}${p && p.spec.attach ? ' · session partagée' : ''}` : `${host.username}@${host.hostname}:${host.port}` }),
       p && p.cwd ? h('span', { class: 'bar-cwd', title: 'Dossier courant (intégration shell) — clic : ouvrir en SFTP', text: '📂 ' + shortPath(p.cwd), onclick: () => openSftp(p.spec.hostId, p.cwd) }) : null,
       p && p.si ? h('span', { class: 'bar-si', title: 'Intégration shell active : code de retour et durée de chaque commande, dossier courant' , text: '⚡' }) : null,
       t.panes.size > 1 ? h('span', { class: 'badge', text: `${t.panes.size} panneaux` }) : null
