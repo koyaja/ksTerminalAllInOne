@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.16.0** · Windows, Linux et **macOS**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.16.1** · Windows, Linux et **macOS**
 
 ---
 
@@ -635,6 +635,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.16.1** | **Transferts de dossiers beaucoup plus rapides** : correction d'un délai réseau de ~40 ms par requête (TCP_NODELAY), 16 fichiers copiés en parallèle, dossiers créés par lots, lecture asynchrone côté appareil lié ; un dossier de 3 000 fichiers passe de plus de 20 min à quelques secondes. Analyse du dossier visible en direct (nombre de fichiers et taille) au lieu d'un 0 % figé |
 | **1.16.0** | **Appareils liés** (Windows ⇄ Mac, même réseau) : copie de fichiers et de dossiers entre les deux PC, terminal de l'autre PC, même session sur les deux, hosts et réglages synchronisés en direct ; appairage par code + code de contrôle |
 | **1.15.1** | Cartes de hosts sous Windows : icônes au trait identiques sur tous les systèmes, bouton Supprimer plus jamais coupé, type d'authentification à côté de l'adresse |
 | **1.15.0** | **Intégration shell** bash / zsh en SSH (sans rien installer) : statut, code et durée de chaque commande, dossier courant (SFTP / éditeur / reconnexion), notification des commandes longues |

@@ -166,7 +166,7 @@ class SshManager {
           if (prompts.some(isPasswordPrompt)) autoPasswordUsed = true;
         }).catch(() => finish([]));
       });
-      conn.on('ready', () => { settled = true; resolve(conn); });
+      conn.on('ready', () => { settled = true; try { conn.setNoDelay(true); } catch { /* ignore */ } resolve(conn); });
       conn.on('error', (err) => {
         if (!settled) {
           let msg = err.message;

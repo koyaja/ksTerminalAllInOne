@@ -88,13 +88,11 @@ function serveSftp(sftp, { platform = process.platform, home = os.homedir(), onE
   sftp.on('OPENDIR', (reqid, p) => guard(reqid, () => {
     const l = local(p);
     if (l === null) return sftp.handle(reqid, newHandle({ type: 'dir', entries: drivesDir(), done: false }));
-    fs.readdir(l, { withFileTypes: true }, (e, ents) => {
+    // Asynchrone : un gros dossier ne bloque pas l'application pendant la lecture.
+    fs.readdir(l, (e, names) => {
       if (e) return sftp.status(reqid, code(e), e.message);
-      const entries = [];
-      for (const d of ents) {
-        try { const st = fs.lstatSync(path.join(l, d.name)); const a = attrsOf(st); entries.push({ filename: d.name, longname: longname(d.name, a), attrs: a }); } catch { /* fichier système inaccessible */ }
-      }
-      sftp.handle(reqid, newHandle({ type: 'dir', entries, done: false }));
+      Promise.all(names.map(n => fs.promises.lstat(path.join(l, n)).then(st => { const a = attrsOf(st); return { filename: n, longname: longname(n, a), attrs: a }; }, () => null)))
+        .then(list => sftp.handle(reqid, newHandle({ type: 'dir', entries: list.filter(Boolean), done: false })));
     });
   }));
   sftp.on('READDIR', (reqid, h) => {

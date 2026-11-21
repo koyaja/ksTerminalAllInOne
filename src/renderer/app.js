@@ -3549,19 +3549,21 @@
     }
     function renderQueue() {
       const jobs = [...t.jobs.values()].sort((a, b) => (b.startedAt || 9e15) - (a.startedAt || 9e15));
-      const active = jobs.filter(j => ['queued', 'running'].includes(j.state)).length;
+      const active = jobs.filter(j => ['queued', 'scanning', 'running'].includes(j.state)).length;
       qTitle.textContent = active ? `Transferts — ${active} en cours` : 'Transferts';
       qList.replaceChildren(...jobs.map(j => {
         const pct = j.bytesTotal ? Math.floor(j.bytesDone / j.bytesTotal * 100) : (j.state === 'done' ? 100 : 0);
         const eta = j.speed && j.bytesTotal ? Math.max(0, Math.round((j.bytesTotal - j.bytesDone) / j.speed)) : null;
-        const info = j.state === 'queued' ? 'en attente' : j.state === 'running'
+        const info = j.state === 'queued' ? 'en attente' : j.state === 'scanning'
+          ? `Analyse du dossier… ${j.filesTotal} fichier(s) · ${fmtSize(j.bytesTotal)}`
+          : j.state === 'running'
           ? `${pct} % · ${fmtSize(j.bytesDone)} / ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesDone}/${j.filesTotal} fichiers` : ''}${j.speed ? ` · ${fmtSize(j.speed)}/s` : ''}${eta !== null ? ` · ${eta < 60 ? eta + ' s' : Math.ceil(eta / 60) + ' min'}` : ''}`
           : j.state === 'done' ? `✓ ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesTotal} fichiers` : ''}${j.skipped ? ` · ${j.skipped} ignoré(s)` : ''}`
             : j.state === 'cancelled' ? 'annulé' : 'échec : ' + j.error;
-        return h('div', { class: 'transfer q-' + j.state, title: j.src + ' → ' + j.dest },
+        return h('div', { class: 'transfer q-' + j.state + (j.state === 'scanning' ? ' q-indet' : ''), title: j.src + ' → ' + j.dest },
           h('span', { text: j.dir === 'up' ? '⤒' : '⤓' }), h('span', { class: 'name', text: j.name + (j.state === 'running' && j.current && j.current !== j.name ? ' › ' + j.current : '') }),
           h('div', { class: 'bar' }, h('i', { style: { width: pct + '%' } })), h('span', { class: 'qinfo', text: info }),
-          ['queued', 'running'].includes(j.state) ? h('button', { class: 'icon-btn mini', title: 'Annuler', onclick: () => api.invoke('sftp:cancel', j.id) }, '✕')
+          ['queued', 'scanning', 'running'].includes(j.state) ? h('button', { class: 'icon-btn mini', title: 'Annuler', onclick: () => api.invoke('sftp:cancel', j.id) }, '✕')
             : j.state === 'done' && j.dir === 'down' ? h('button', { class: 'icon-btn mini', title: 'Ouvrir le dossier', onclick: () => api.invoke('lfs:open', j.dest) }, '📂') : h('span'));
       }));
     }

@@ -1065,6 +1065,31 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await assert.rejects(new Promise((res, rej) => sftp.stat(dir + '/absent', e => e ? rej(e) : res())), (e) => e.code === 2);
       B.m.close('ps1');
     });
+    await test('dossier de 300 fichiers entre appareils : analyse visible, copie parallèle, rapide', async () => {
+      const { SftpJobs } = require('../src/main/sftp-jobs');
+      await B.m.openSftp('ps2', 'peer:' + A.ps.identity().id);
+      const src = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-tree-'));
+      for (let i = 0; i < 15; i++) { const d = path.join(src, 'rep' + i, 'sous'); fs.mkdirSync(d, { recursive: true }); for (let j = 0; j < 20; j++) fs.writeFileSync(path.join(d, `f${j}.txt`), `contenu ${i}-${j}\n`.repeat(50 + j)); }
+      const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-dst-')), back = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-back-'));
+      const seen = [];
+      const jobs = new SftpJobs({ manager: B.m, emit: (c, j) => seen.push({ state: j.state, filesTotal: j.filesTotal, bytesDone: j.bytesDone }) });
+      for (const [dir, from, to] of [['up', src, dst], ['down', path.join(dst, path.basename(src)), back]]) {
+        seen.length = 0;
+        const t0 = Date.now();
+        const [id] = jobs.add({ sessionId: 'ps2', dir, items: [from], dest: to });
+        for (let i = 0; i < 300 && !['done', 'error'].includes(jobs.jobs.get(id).state); i++) await sleep(50);
+        const j = jobs.jobs.get(id);
+        assert.strictEqual(j.state, 'done', j.error);
+        assert.strictEqual(j.filesDone, 300);
+        assert.ok(Date.now() - t0 < 8000, `${dir} : ${Date.now() - t0} ms`);
+        const states = [...new Set(seen.map(x => x.state))];
+        assert.deepStrictEqual(states.filter(x => x !== 'queued'), ['scanning', 'running', 'done'], 'étapes visibles : ' + states);
+        assert.strictEqual(j.filesTotal, 300);
+      }
+      const list = (r) => { const out = []; const w = (d, rel) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p2 = path.join(d, e.name); if (e.isDirectory()) w(p2, rel + e.name + '/'); else out.push(rel + e.name + ':' + fs.readFileSync(p2, 'utf8').length); } }; w(r, ''); return out.sort(); };
+      assert.deepStrictEqual(list(path.join(back, path.basename(src))), list(src), 'aller-retour identique');
+      B.m.close('ps2');
+    });
     await test('chemins Windows exposés en /C:/… (racine = lecteurs)', () => {
       const W = makePaths('win32');
       assert.strictEqual(W.toLocal('/C:/Users/koyaja/Desktop'), 'C:\\Users\\koyaja\\Desktop');

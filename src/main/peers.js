@@ -297,6 +297,9 @@ class PeerService {
 
   // ---------- Côté serveur : ce que peut faire un appareil appairé ----------
   onClient(client, info) {
+    // Sans TCP_NODELAY chaque petite requête SFTP attend ~40 ms (Nagle + ACK retardé) :
+    // un dossier de milliers de fichiers prenait des dizaines de minutes.
+    try { client.setNoDelay(true); } catch { /* ignore */ }
     this.clients.add(client);
     client.on('close', () => this.clients.delete(client));
     client.on('error', () => {});

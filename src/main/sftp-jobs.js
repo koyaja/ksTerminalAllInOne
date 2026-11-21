@@ -14,6 +14,13 @@ const P = path.posix;
 const isDirMode = (m) => (m & 0o170000) === 0o040000;
 
 function cb2p(fn) { return new Promise((res, rej) => fn((e, r) => (e ? rej(e) : res(r)))); }
+const PARALLEL = 16; // fichiers / dossiers traités en même temps : masque la latence réseau (Wi-Fi, VPN)
+async function pool(items, n, fn, stop = () => false) {
+  let i = 0, err = null;
+  const worker = async () => { while (!err && !stop() && i < items.length) { const it = items[i++]; try { await fn(it); } catch (e) { err = err || e; } } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+  if (err) throw err;
+}
 
 class SftpJobs {
   constructor({ manager, emit, concurrency = 2 }) {
@@ -35,7 +42,7 @@ class SftpJobs {
         id, sessionId, dir, src, dest, policy,
         name: dir === 'up' ? path.basename(src) : P.basename(src),
         state: 'queued', bytesDone: 0, bytesTotal: 0, filesDone: 0, filesTotal: 0, skipped: 0,
-        speed: 0, error: null, startedAt: null, endedAt: null, cancel: false, channel: null, current: ''
+        speed: 0, error: null, startedAt: null, endedAt: null, cancel: false, channel: null, current: '', doneBytes: 0, inflight: new Map()
       };
       this.jobs.set(id, job);
       this.queue.push(job);
@@ -74,7 +81,9 @@ class SftpJobs {
   }
 
   async run(job) {
-    job.state = 'running'; job.startedAt = Date.now(); this.push(job, true);
+    // « scanning » : inventaire du dossier (le nombre de fichiers et la taille montent en direct),
+    // puis « running » : copie, plusieurs fichiers à la fois.
+    job.state = 'scanning'; job.startedAt = Date.now(); this.push(job, true);
     const s = this.manager.sessions.get(job.sessionId);
     try {
       if (!s || !s.conn) throw new Error('Session SFTP fermée');
@@ -82,12 +91,10 @@ class SftpJobs {
       const plan = job.dir === 'up' ? await this.planUp(job) : await this.planDown(job);
       job.filesTotal = plan.files.length;
       job.bytesTotal = plan.files.reduce((a, f) => a + f.size, 0);
+      job.state = 'running'; job.copyStartedAt = Date.now();
       this.push(job, true);
-      for (const d of plan.dirs) await this.ensureDir(job, d);
-      for (const f of plan.files) {
-        if (job.cancel) break;
-        await this.transferFile(job, f);
-      }
+      await this.ensureDirs(job, plan.dirs);
+      await pool(plan.files, PARALLEL, f => this.transferFile(job, f), () => job.cancel);
       if (job.cancel) throw Object.assign(new Error('Annulé'), { cancelled: true });
       job.state = 'done';
     } catch (e) {
@@ -107,15 +114,15 @@ class SftpJobs {
     if (destRoot === null) return { dirs: [], files: [] };
     if (!st.isDirectory()) return { dirs: [], files: [{ from: job.src, to: destRoot, size: st.size }] };
     const dirs = [destRoot], files = [];
-    const walk = (local, remote) => {
-      for (const ent of fs.readdirSync(local, { withFileTypes: true })) {
+    const walk = async (local, remote) => {
+      for (const ent of await fs.promises.readdir(local, { withFileTypes: true })) {
         if (job.cancel) return;
         const l = path.join(local, ent.name), r = P.join(remote, ent.name);
-        if (ent.isDirectory()) { dirs.push(r); walk(l, r); }
-        else if (ent.isFile()) files.push({ from: l, to: r, size: fs.statSync(l).size });
+        if (ent.isDirectory()) { dirs.push(r); await walk(l, r); }
+        else if (ent.isFile()) { const size = (await fs.promises.stat(l)).size; files.push({ from: l, to: r, size }); this.scanned(job, size); }
       }
     };
-    walk(job.src, destRoot);
+    await walk(job.src, destRoot);
     return { dirs, files };
   }
 
@@ -126,15 +133,18 @@ class SftpJobs {
     if (destRoot === null) return { dirs: [], files: [] };
     if (!isDirMode(st.mode)) return { dirs: [], files: [{ from: job.src, to: destRoot, size: st.size }] };
     const dirs = [destRoot], files = [];
+    // Sous-dossiers lus en parallèle (une lecture distante = un aller-retour réseau).
     const walk = async (remote, local) => {
+      if (job.cancel) return;
       const list = await cb2p(cb => ch.readdir(remote, cb));
+      const sub = [];
       for (const e of list) {
-        if (job.cancel) return;
         if (e.filename === '.' || e.filename === '..') continue;
         const r = P.join(remote, e.filename), l = path.join(local, safeLocalName(e.filename));
-        if (isDirMode(e.attrs.mode)) { dirs.push(l); await walk(r, l); }
-        else if ((e.attrs.mode & 0o170000) === 0o100000) files.push({ from: r, to: l, size: e.attrs.size });
+        if (isDirMode(e.attrs.mode)) { dirs.push(l); sub.push([r, l]); }
+        else if ((e.attrs.mode & 0o170000) === 0o100000) { files.push({ from: r, to: l, size: e.attrs.size }); this.scanned(job, e.attrs.size); }
       }
+      await pool(sub, PARALLEL, ([r, l]) => walk(r, l), () => job.cancel);
     };
     await walk(job.src, destRoot);
     return { dirs, files };
@@ -161,6 +171,19 @@ class SftpJobs {
     try { await cb2p(cb => job.channel.stat(p, cb)); return true; } catch { return false; }
   }
 
+  scanned(job, size) { job.filesTotal++; job.bytesTotal += size; this.push(job); }
+
+  // Dossiers créés niveau par niveau (parents d'abord), plusieurs à la fois par niveau.
+  async ensureDirs(job, dirs) {
+    const sep = job.dir === 'up' ? '/' : path.sep;
+    const byDepth = new Map();
+    for (const d of dirs) { const k = d.split(sep).length; if (!byDepth.has(k)) byDepth.set(k, []); byDepth.get(k).push(d); }
+    for (const k of [...byDepth.keys()].sort((a, b) => a - b)) {
+      if (job.cancel) return;
+      await pool(byDepth.get(k), PARALLEL, d => this.ensureDir(job, d), () => job.cancel);
+    }
+  }
+
   async ensureDir(job, d) {
     if (job.dir === 'down') { fs.mkdirSync(d, { recursive: true }); return; }
     try { await cb2p(cb => job.channel.mkdir(d, cb)); } catch (e) {
@@ -172,16 +195,19 @@ class SftpJobs {
     job.current = job.dir === 'up' ? path.basename(f.from) : P.basename(f.from);
     if (job.policy === 'skip') {
       const exists = job.dir === 'up' ? await this.remoteExists(job, f.to) : fs.existsSync(f.to);
-      if (exists) { job.skipped++; job.filesDone++; job.bytesDone += f.size; this.push(job); return; }
+      if (exists) { job.skipped++; job.filesDone++; job.doneBytes += f.size; job.bytesDone = job.doneBytes; this.push(job); return; }
     }
-    const base = job.bytesDone;
     const t0 = Date.now();
-    const step = (done) => {
-      job.bytesDone = base + done;
-      const el = (Date.now() - job.startedAt) / 1000;
+    // Plusieurs fichiers en cours : progression = fichiers finis + part copiée des fichiers en cours.
+    const refresh = () => {
+      let inflight = 0; for (const v of job.inflight.values()) inflight += v;
+      job.bytesDone = job.doneBytes + inflight;
+      const el = (Date.now() - (job.copyStartedAt || job.startedAt)) / 1000;
       job.speed = el > 0.3 ? Math.round(job.bytesDone / el) : 0;
       this.push(job);
     };
+    job.inflight.set(f, 0);
+    const step = (done) => { job.inflight.set(f, done); refresh(); };
     await new Promise((resolve, reject) => {
       const cb = (e) => (e ? reject(job.cancel ? Object.assign(new Error('Annulé'), { cancelled: true }) : new Error(`${job.current} : ${e.message}`)) : resolve());
       if (f.size === 0) {
@@ -193,13 +219,15 @@ class SftpJobs {
       if (job.dir === 'up') job.channel.fastPut(f.from, f.to, { step }, cb);
       else job.channel.fastGet(f.from, f.to, { step }, cb);
     }).catch((e) => {
+      job.inflight.delete(f);
       if (job.dir === 'down') { try { fs.unlinkSync(f.to); } catch { /* fichier partiel */ } }
       throw e;
     });
-    job.bytesDone = base + f.size;
+    job.inflight.delete(f);
+    job.doneBytes += f.size;
     job.filesDone++;
     job.lastFileMs = Date.now() - t0;
-    this.push(job);
+    refresh();
   }
 }
 
@@ -211,7 +239,7 @@ function safeLocalName(n) {
 }
 
 function pub(j) {
-  const { channel, cancel, lastEmit, ...rest } = j;
+  const { channel, cancel, lastEmit, inflight, doneBytes, ...rest } = j;
   return rest;
 }
 
