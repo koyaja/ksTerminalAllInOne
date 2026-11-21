@@ -1588,9 +1588,30 @@
     return h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: title }), h('div', { class: 'muted small', text: desc })), sel);
   }
   function securityRows() {
-    const lockSel = h('select', { style: { width: '150px' } }, [[0, 'Jamais'], [1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 heure'], [240, '4 heures']].map(([v, l]) => h('option', { value: String(v), text: l })));
-    lockSel.value = String(S.settings.autoLockMinutes === undefined ? 15 : S.settings.autoLockMinutes);
-    lockSel.addEventListener('change', async () => { const s = await guard(() => api.invoke('settings:save', { autoLockMinutes: Number(lockSel.value) })); if (s) S = s; });
+    const PRESETS = [[0, 'Jamais (désactivé)'], [1, '1 minute'], [5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 heure'], [240, '4 heures'], [480, '8 heures']];
+    const fmtMin = (m) => m >= 60 && m % 60 === 0 ? `${m / 60} heure${m >= 120 ? 's' : ''}` : m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} minute${m > 1 ? 's' : ''}`;
+    const lockSel = h('select', { style: { width: '180px' } });
+    const curLock = () => (S.settings.autoLockMinutes === undefined ? 15 : S.settings.autoLockMinutes);
+    const fillLock = () => {
+      const cur = curLock();
+      const opts = PRESETS.some(([v]) => v === cur) ? PRESETS : [...PRESETS, [cur, fmtMin(cur) + ' (perso)']].sort((a, b) => a[0] - b[0]);
+      lockSel.replaceChildren(...opts.map(([v, l]) => h('option', { value: String(v), text: l })), h('option', { value: 'custom', text: 'Personnalisé…' }));
+      lockSel.value = String(cur);
+    };
+    fillLock();
+    lockSel.addEventListener('change', async () => {
+      let v = lockSel.value;
+      if (v === 'custom') {
+        const inp = h('input', { type: 'number', min: '1', max: '1440', value: String(curLock() || 20), style: { width: '120px' } });
+        const ok = await modal({ title: 'Verrouillage automatique', body: [field('Verrouiller après (minutes sans activité, 1 à 1440)', inp)], actions: [{ label: 'Annuler', value: false }, { label: 'Enregistrer', class: 'primary', submit: true, value: true }] });
+        const n = Math.round(Number(inp.value));
+        if (!ok || !(n >= 1 && n <= 1440)) { if (ok) toast('Durée invalide (1 à 1440 minutes)', true); fillLock(); return; }
+        v = n;
+      }
+      const s = await guard(() => api.invoke('settings:save', { autoLockMinutes: Number(v) }));
+      if (s) { S = s; toast(Number(v) ? `Verrouillage après ${fmtMin(Number(v))} d'inactivité` : 'Verrouillage automatique désactivé'); }
+      fillLock();
+    });
 
     const helloSel = h('select', { style: { width: '200px' }, disabled: true },
       h('option', { value: 'off', text: 'Désactivé' }), h('option', { value: 'screen', text: 'Écran verrouillé' }), h('option', { value: 'startup', text: 'Écran + démarrage' }));
@@ -1616,7 +1637,7 @@
 
     return [
       h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Verrouillage automatique' }), h('div', { class: 'muted small', text: 'Après cette durée sans clavier ni souris dans KSTermus. Les sessions et tunnels continuent ; Ctrl+Shift+L verrouille tout de suite.' })), lockSel),
-      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Verrouiller avec Windows' }), h('div', { class: 'muted small', text: 'Quand la session Windows se verrouille (Win+L) ou que le PC se met en veille.' })),
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: api.platform === 'darwin' ? 'Verrouiller avec le Mac' : api.platform === 'win32' ? 'Verrouiller avec Windows' : 'Verrouiller avec la session' }), h('div', { class: 'muted small', text: api.platform === 'darwin' ? 'Quand l\'écran du Mac se verrouille (Ctrl+Cmd+Q) ou que le Mac se met en veille. Décoche pour que KSTermus reste ouvert.' : 'Quand la session se verrouille (Win+L) ou que le PC se met en veille. Décoche pour que KSTermus reste ouvert.' })),
         checkbox(S.settings.lockOnSystemLock !== false, async (c) => { const s = await guard(() => api.invoke('settings:save', { lockOnSystemLock: c.checked })); if (s) S = s; })),
       h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Windows Hello' }), helloInfo), helloSel),
       settingSelect('Alerte commandes dangereuses', 'rm -rf, DROP, mkfs, reboot, git push --force… : confirmation en retapant le nom du host.', 'dangerMode', 'prod',
