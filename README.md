@@ -3,7 +3,7 @@
 > Client SSH, SFTP et terminal local pour Windows, pensé pour les équipes qui administrent des serveurs au quotidien.
 > Inspiré de **Termius** (hosts, keychain, SFTP), **tmux** (panneaux, préfixe, sessions détachées) et **Warp** (palette de commandes, blocs, workflows paramétrés).
 
-Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.16.3** · Windows, Linux et **macOS**
+Éditeur : **CYBERISK** · Licence : propriétaire (UNLICENSED) · Version : **1.16.4** · Windows, Linux et **macOS**
 
 ---
 
@@ -635,6 +635,7 @@ Le script refuse une clé qui ne correspond pas à la clé publique intégrée (
 
 | Version | Contenu |
 |---|---|
+| **1.16.4** | Gros dossiers : **la copie démarre pendant l'analyse** (premiers fichiers en moins d'une seconde, même avec des centaines de milliers de fichiers) ; la reprise ne lance plus deux fois la même copie (clic + reprise automatique) ; annulation toujours immédiate |
 | **1.16.3** | **Plus de transfert coupé par la veille** : l'ordinateur ne se met plus en veille tout seul pendant une copie, des deux côtés (désactivable : Paramètres ▸ Empêcher la veille pendant les transferts). En cas de coupure (capot fermé, Wi-Fi), reconnexion et **reprise automatiques** jusqu'à 10 min : les fichiers déjà copiés en entier ne sont pas recopiés ; bouton ↻ pour reprendre à la main |
 | **1.16.2** | Verrouillage automatique : durée **personnalisée** (1 min à 24 h) en plus de Jamais / 1 min … 8 h ; option « Verrouiller avec le Mac / Windows » explicite sur chaque système |
 | **1.16.1** | **Transferts de dossiers beaucoup plus rapides** : correction d'un délai réseau de ~40 ms par requête (TCP_NODELAY), 16 fichiers copiés en parallèle, dossiers créés par lots, lecture asynchrone côté appareil lié ; un dossier de 3 000 fichiers passe de plus de 20 min à quelques secondes. Analyse du dossier visible en direct (nombre de fichiers et taille) au lieu d'un 0 % figé |

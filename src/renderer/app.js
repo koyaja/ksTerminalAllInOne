@@ -3579,11 +3579,13 @@
         const eta = j.speed && j.bytesTotal ? Math.max(0, Math.round((j.bytesTotal - j.bytesDone) / j.speed)) : null;
         const info = j.state === 'queued' ? 'en attente' : j.state === 'scanning'
           ? `Analyse du dossier… ${j.filesTotal} fichier(s) · ${fmtSize(j.bytesTotal)}`
+          : j.state === 'running' && j.scanning
+          ? `${j.filesDone} fichier(s) copié(s) · ${fmtSize(j.bytesDone)} — analyse en cours : ${j.filesTotal} trouvé(s), ${fmtSize(j.bytesTotal)}${j.speed ? ` · ${fmtSize(j.speed)}/s` : ''}`
           : j.state === 'running'
           ? `${pct} % · ${fmtSize(j.bytesDone)} / ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesDone}/${j.filesTotal} fichiers` : ''}${j.speed ? ` · ${fmtSize(j.speed)}/s` : ''}${eta !== null ? ` · ${eta < 60 ? eta + ' s' : Math.ceil(eta / 60) + ' min'}` : ''}`
           : j.state === 'done' ? `✓ ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesTotal} fichiers` : ''}${j.skipped ? ` · ${j.skipped} ignoré(s)` : ''}`
             : j.resumed ? `interrompu à ${pct} % → repris ci-dessus` : j.state === 'cancelled' ? 'annulé' : 'échec : ' + j.error;
-        return h('div', { class: 'transfer q-' + j.state + (j.state === 'scanning' ? ' q-indet' : ''), title: j.src + ' → ' + j.dest },
+        return h('div', { class: 'transfer q-' + j.state + (j.state === 'scanning' || j.scanning ? ' q-indet' : ''), title: j.src + ' → ' + j.dest },
           h('span', { text: j.dir === 'up' ? '⤒' : '⤓' }), h('span', { class: 'name', text: j.name + (j.state === 'running' && j.current && j.current !== j.name ? ' › ' + j.current : '') }),
           h('div', { class: 'bar' }, h('i', { style: { width: pct + '%' } })), h('span', { class: 'qinfo', text: info }),
           ['queued', 'scanning', 'running'].includes(j.state) ? h('button', { class: 'icon-btn mini', title: 'Annuler', onclick: () => api.invoke('sftp:cancel', j.id) }, '✕')
@@ -3593,11 +3595,16 @@
     }
     // Reprise : reconnecte si besoin, puis relance avec la politique « resume ».
     async function resumeJobs(list) {
-      if (t.status !== 'on' && !(await t.reconnect())) { toast('Toujours injoignable : réessaie dans un instant', true); return false; }
-      for (const j of list) {
-        const old = t.jobs.get(j.id); if (old) old.resumed = true;
-        await guard(() => api.invoke('sftp:enqueue', { sessionId: id, dir: j.dir, items: [j.src], dest: j.dest, policy: 'resume' }));
+      // Marquées avant toute attente : un 2e clic ou la reprise automatique ne relancent pas la même copie.
+      const todo = list.map(j => t.jobs.get(j.id) || j).filter(j => !j.resumed);
+      if (!todo.length) return true;
+      todo.forEach(j => { j.resumed = true; });
+      renderQueue();
+      if (t.status !== 'on' && !(await t.reconnect())) {
+        todo.forEach(j => { j.resumed = false; }); renderQueue();
+        toast('Toujours injoignable : réessaie dans un instant', true); return false;
       }
+      for (const j of todo) await guard(() => api.invoke('sftp:enqueue', { sessionId: id, dir: j.dir, items: [j.src], dest: j.dest, policy: 'resume' }));
       renderQueue();
       return true;
     }

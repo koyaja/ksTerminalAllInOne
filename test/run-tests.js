@@ -1114,6 +1114,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       assert.strictEqual(activity[activity.length - 1], 0, 'veille de nouveau autorisée à la fermeture');
       A.ps.onActivity = () => {};
     });
+    await test('gros dossier : la copie démarre pendant l\'analyse ; pas de doublon de la même copie', async () => {
+      const { SftpJobs } = require('../src/main/sftp-jobs');
+      await B.m.openSftp('ps4', 'peer:' + A.ps.identity().id);
+      const src = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-flow-'));
+      for (let i = 0; i < 120; i++) { const d = path.join(src, 'a' + i, 'b', 'c'); fs.mkdirSync(d, { recursive: true }); for (let k = 0; k < 10; k++) fs.writeFileSync(path.join(d, `x${k}.txt`), 'y'.repeat(4000)); }
+      const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-flowd-'));
+      const seen = [];
+      const jobs = new SftpJobs({ manager: B.m, emit: (c, j) => seen.push({ ...j }) });
+      const [id] = jobs.add({ sessionId: 'ps4', dir: 'down', items: [src], dest: dst });
+      const [id2] = jobs.add({ sessionId: 'ps4', dir: 'down', items: [src], dest: dst, policy: 'resume' });
+      assert.strictEqual(id2, id, 'même copie déjà en cours : pas de doublon');
+      for (let i = 0; i < 300 && !['done', 'error'].includes(jobs.jobs.get(id).state); i++) await sleep(50);
+      const j = jobs.jobs.get(id);
+      assert.strictEqual(j.state, 'done', j.error);
+      assert.strictEqual(j.filesDone, 1200);
+      assert.ok(j.firstDoneAt < j.scanEndedAt, `1er fichier copié à +${j.firstDoneAt - j.startedAt} ms, analyse finie à +${j.scanEndedAt - j.startedAt} ms`);
+      assert.strictEqual(fs.readFileSync(path.join(dst, path.basename(src), 'a119', 'b', 'c', 'x9.txt'), 'utf8').length, 4000);
+      B.m.close('ps4');
+    });
     await test('chemins Windows exposés en /C:/… (racine = lecteurs)', () => {
       const W = makePaths('win32');
       assert.strictEqual(W.toLocal('/C:/Users/koyaja/Desktop'), 'C:\\Users\\koyaja\\Desktop');
