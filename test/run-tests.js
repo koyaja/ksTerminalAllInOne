@@ -1090,6 +1090,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       assert.deepStrictEqual(list(path.join(back, path.basename(src))), list(src), 'aller-retour identique');
       B.m.close('ps2');
     });
+    await test('reprise après coupure : fichiers complets ignorés, fichier tronqué refait ; anti-veille côté serveur', async () => {
+      const { SftpJobs } = require('../src/main/sftp-jobs');
+      const activity = [];
+      A.ps.onActivity = (n) => activity.push(n);
+      await B.m.openSftp('ps3', 'peer:' + A.ps.identity().id);
+      assert.strictEqual(activity[activity.length - 1], 1, 'veille bloquée pendant que B a les fichiers de A ouverts');
+      const src = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-res-'));
+      for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(src, `f${i}.bin`), require('crypto').randomBytes(20000 + i));
+      const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'kstp-resd-'));
+      const jobs = new SftpJobs({ manager: B.m, emit: () => {} });
+      const run = async (policy) => { const [id] = jobs.add({ sessionId: 'ps3', dir: 'up', items: [src], dest: dst, policy }); for (let i = 0; i < 200 && !['done', 'error'].includes(jobs.jobs.get(id).state); i++) await sleep(50); return jobs.jobs.get(id); };
+      assert.strictEqual((await run('overwrite')).state, 'done');
+      const out = path.join(dst, path.basename(src));
+      fs.unlinkSync(path.join(out, 'f3.bin'));                       // jamais arrivé
+      fs.truncateSync(path.join(out, 'f7.bin'), 1000);                // coupé au milieu
+      const j = await run('resume');
+      assert.strictEqual(j.state, 'done');
+      assert.strictEqual(j.skipped, 38, 'les 38 fichiers complets ne sont pas recopiés');
+      for (const f of ['f3.bin', 'f7.bin']) assert.ok(fs.readFileSync(path.join(out, f)).equals(fs.readFileSync(path.join(src, f))), f + ' refait');
+      assert.strictEqual(jobs.activeCount(), 0);
+      B.m.close('ps3'); await sleep(300);
+      assert.strictEqual(activity[activity.length - 1], 0, 'veille de nouveau autorisée à la fermeture');
+      A.ps.onActivity = () => {};
+    });
     await test('chemins Windows exposés en /C:/… (racine = lecteurs)', () => {
       const W = makePaths('win32');
       assert.strictEqual(W.toLocal('/C:/Users/koyaja/Desktop'), 'C:\\Users\\koyaja\\Desktop');

@@ -1652,6 +1652,8 @@
         checkbox(S.settings.shellIntegration !== false, async (c) => { const st2 = await guard(() => api.invoke('settings:save', { shellIntegration: c.checked })); if (st2) S = st2; })),
       settingSelect('Notifier les commandes longues', 'Quand une commande dure plus longtemps que ce seuil et se termine pendant que tu regardes ailleurs (autre onglet, autre fenêtre) : notification avec le résultat.', 'notifyLongCommands', 10,
         [[0, 'Jamais'], [10, 'Plus de 10 s'], [30, 'Plus de 30 s'], [60, 'Plus d\'1 min'], [300, 'Plus de 5 min']], true),
+      h('div', { class: 'row' }, h('div', { class: 'row-main' }, h('div', { class: 'row-title', text: 'Empêcher la veille pendant les transferts' }), h('div', { class: 'muted small', text: 'Tant qu\'une copie de fichiers est en cours (ou qu\'un appareil lié copie des fichiers depuis ce PC), l\'ordinateur ne se met pas en veille tout seul. L\'écran peut s\'éteindre. Fermer le capot d\'un Mac le met quand même en veille.' })),
+        checkbox(S.settings.keepAwakeTransfers !== false, async (c) => { const st2 = await guard(() => api.invoke('settings:save', { keepAwakeTransfers: c.checked })); if (st2) S = st2; })),
       settingSelect('Enregistrement des sessions SSH', 'Tout ce qui s\'affiche est enregistré (chiffré) pour être relu dans Journal ▸ Enregistrements. Les mots de passe tapés à une invite masquée ne s\'affichent pas, donc ne sont pas enregistrés.', 'recordSessions', 'marked',
         [['marked', 'Hosts cochés « Enregistrer »'], ['all', 'Toutes les sessions SSH'], ['off', 'Jamais']])
     ];
@@ -3580,14 +3582,26 @@
           : j.state === 'running'
           ? `${pct} % · ${fmtSize(j.bytesDone)} / ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesDone}/${j.filesTotal} fichiers` : ''}${j.speed ? ` · ${fmtSize(j.speed)}/s` : ''}${eta !== null ? ` · ${eta < 60 ? eta + ' s' : Math.ceil(eta / 60) + ' min'}` : ''}`
           : j.state === 'done' ? `✓ ${fmtSize(j.bytesTotal)}${j.filesTotal > 1 ? ` · ${j.filesTotal} fichiers` : ''}${j.skipped ? ` · ${j.skipped} ignoré(s)` : ''}`
-            : j.state === 'cancelled' ? 'annulé' : 'échec : ' + j.error;
+            : j.resumed ? `interrompu à ${pct} % → repris ci-dessus` : j.state === 'cancelled' ? 'annulé' : 'échec : ' + j.error;
         return h('div', { class: 'transfer q-' + j.state + (j.state === 'scanning' ? ' q-indet' : ''), title: j.src + ' → ' + j.dest },
           h('span', { text: j.dir === 'up' ? '⤒' : '⤓' }), h('span', { class: 'name', text: j.name + (j.state === 'running' && j.current && j.current !== j.name ? ' › ' + j.current : '') }),
           h('div', { class: 'bar' }, h('i', { style: { width: pct + '%' } })), h('span', { class: 'qinfo', text: info }),
           ['queued', 'scanning', 'running'].includes(j.state) ? h('button', { class: 'icon-btn mini', title: 'Annuler', onclick: () => api.invoke('sftp:cancel', j.id) }, '✕')
+            : (j.state === 'error' || j.state === 'cancelled') && !j.resumed ? h('button', { class: 'icon-btn mini', title: 'Reprendre (les fichiers déjà copiés en entier ne sont pas recopiés)', onclick: () => resumeJobs([j]) }, '↻')
             : j.state === 'done' && j.dir === 'down' ? h('button', { class: 'icon-btn mini', title: 'Ouvrir le dossier', onclick: () => api.invoke('lfs:open', j.dest) }, '📂') : h('span'));
       }));
     }
+    // Reprise : reconnecte si besoin, puis relance avec la politique « resume ».
+    async function resumeJobs(list) {
+      if (t.status !== 'on' && !(await t.reconnect())) { toast('Toujours injoignable : réessaie dans un instant', true); return false; }
+      for (const j of list) {
+        const old = t.jobs.get(j.id); if (old) old.resumed = true;
+        await guard(() => api.invoke('sftp:enqueue', { sessionId: id, dir: j.dir, items: [j.src], dest: j.dest, policy: 'resume' }));
+      }
+      renderQueue();
+      return true;
+    }
+    t.resumeJobs = resumeJobs;
     t.onJob = (j) => {
       const prev = t.jobs.get(j.id);
       t.jobs.set(j.id, j);
@@ -3659,9 +3673,13 @@
       try {
         const r = await api.invoke('sftp:open', id, hostId);
         if (!tabs.has(id)) { api.invoke('sftp:close', id); return; }
-        t.home = r.home; overlay(wrap, null); setStatus(t, 'on');
+        t.home = r.home; overlay(wrap, null); setStatus(t, 'on'); t.status = 'on';
         if (!(startDir && await go(startDir))) await go(r.home);
         remote.focus();
+        t.reconnect = async () => {
+          try { await api.invoke('sftp:open', id, hostId); t.status = 'on'; setStatus(t, 'on'); await go(t.cwd || t.home); return true; }
+          catch { return false; }
+        };
       } catch (e) {
         setStatus(t, 'off');
         overlay(wrap, [h('div', { style: { fontWeight: 600 }, text: 'Échec SFTP' }), h('div', { class: 'muted', text: e.message }),
@@ -3679,7 +3697,22 @@
     const fn = t && t.transfers && t.transfers.get(transferId);
     if (fn) fn(done, total);
   });
-  api.on('sftp:closed', ({ sessionId }) => { const t = tabs.get(sessionId); if (t) { setStatus(t, 'off'); toast(`SFTP ${t.title} : connexion fermée`, true); } });
+  // Coupure (veille, Wi-Fi…) pendant des transferts : reconnexion automatique puis reprise sans tout recopier.
+  api.on('sftp:closed', ({ sessionId }) => {
+    const t = tabs.get(sessionId); if (!t) return;
+    t.status = 'off'; setStatus(t, 'off');
+    const closedAt = Date.now();
+    setTimeout(async () => {
+      const cut = [...(t.jobs || new Map()).values()].filter(j => !j.resumed && (['queued', 'scanning', 'running'].includes(j.state) || (j.state === 'error' && (j.endedAt || 0) >= closedAt - 5000)));
+      if (!cut.length || !t.reconnect) { toast(`SFTP ${t.title} : connexion fermée`, true); return; }
+      toast(`SFTP ${t.title} : connexion coupée pendant un transfert — reprise automatique dès que l'appareil répond…`, true);
+      for (let i = 0; i < 120 && tabs.has(sessionId); i++) {   // jusqu'à 10 min (réveil du Mac, retour du Wi-Fi)
+        if (await t.reconnect()) { await t.resumeJobs(cut); toast(`✓ ${t.title} : transfert repris`); return; }
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      toast(`${t.title} toujours injoignable : clique ↻ sur le transfert pour le reprendre`, true);
+    }, 1200);
+  });
   api.on('tunnel:status', ({ forwardId, active, reason, reconnecting, attempt, delay }) => {
     const f = S && S.forwards.find(x => x.id === forwardId);
     const name = f ? (f.label || forwardDesc(f)) : '';

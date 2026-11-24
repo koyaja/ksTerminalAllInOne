@@ -70,7 +70,10 @@ class PeerService {
     this.seen = new Map();                        // id -> { id, name, platform, port, fp, addr, version, at }
     this.pairing = null;                          // { code, expiresAt, tries }
     this.clients = new Set();
+    this.onActivity = o.onActivity || (() => {});   // (n) : nombre de sessions servies à des appareils liés
+    this.activeSessions = 0;
   }
+  busy(delta) { this.activeSessions = Math.max(0, this.activeSessions + delta); this.onActivity(this.activeSessions); }
 
   // ---------- Identité et liste des appareils appairés (dans le coffre, non synchronisées) ----------
   machineTag() { return crypto.createHash('sha256').update(os.hostname() + '|' + this.userDataDir).digest('hex').slice(0, 16); }
@@ -347,7 +350,11 @@ class PeerService {
     const who = client.peerName || 'Un appareil';
     session.on('sftp', (accept) => {
       this.audit('peer-sftp', who);
-      serveSftp(accept(), { platform: this.platform, home: os.homedir() });
+      const sftp = accept();
+      // L'autre PC copie des fichiers depuis / vers celui-ci : on empêche la veille tant que c'est ouvert.
+      this.busy(1); let ended = false; const end = () => { if (!ended) { ended = true; this.busy(-1); } };
+      sftp.on('close', end); sftp.on('end', end); client.on('close', end);
+      serveSftp(sftp, { platform: this.platform, home: os.homedir() });
     });
     session.on('shell', (accept, reject) => {
       if (!this.spawnShell) return deny(reject);

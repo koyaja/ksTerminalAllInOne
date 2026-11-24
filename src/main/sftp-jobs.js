@@ -32,7 +32,8 @@ class SftpJobs {
     this.running = 0;
   }
 
-  // dir: 'up' | 'down' ; items: chemins source ; dest: dossier cible ; policy: overwrite | skip | rename
+  // dir: 'up' | 'down' ; items: chemins source ; dest: dossier cible ;
+  // policy: overwrite | skip | rename | resume (reprise : fichiers déjà présents à la bonne taille ignorés)
   add({ sessionId, dir, items, dest, policy = 'overwrite' }) {
     if (!['up', 'down'].includes(dir)) throw new Error('Sens de transfert invalide');
     if (!Array.isArray(items) || !items.length) throw new Error('Rien à transférer');
@@ -64,6 +65,7 @@ class SftpJobs {
   cancelSession(sessionId) { for (const j of this.jobs.values()) if (j.sessionId === sessionId) this.cancel(j.id); }
   clearFinished() { for (const [id, j] of this.jobs) if (['done', 'error', 'cancelled'].includes(j.state)) this.jobs.delete(id); }
   list(sessionId) { return [...this.jobs.values()].filter(j => !sessionId || j.sessionId === sessionId).map(pub); }
+  activeCount() { let n = 0; for (const j of this.jobs.values()) if (['queued', 'scanning', 'running'].includes(j.state)) n++; return n; }
 
   push(job, force) {
     const now = Date.now();
@@ -85,26 +87,37 @@ class SftpJobs {
     // puis « running » : copie, plusieurs fichiers à la fois.
     job.state = 'scanning'; job.startedAt = Date.now(); this.push(job, true);
     const s = this.manager.sessions.get(job.sessionId);
+    let onLost = null;
     try {
       if (!s || !s.conn) throw new Error('Session SFTP fermée');
-      job.channel = await cb2p(cb => s.conn.sftp(cb));
-      const plan = job.dir === 'up' ? await this.planUp(job) : await this.planDown(job);
-      job.filesTotal = plan.files.length;
-      job.bytesTotal = plan.files.reduce((a, f) => a + f.size, 0);
-      job.state = 'running'; job.copyStartedAt = Date.now();
-      this.push(job, true);
-      await this.ensureDirs(job, plan.dirs);
-      await pool(plan.files, PARALLEL, f => this.transferFile(job, f), () => job.cancel);
+      // Connexion perdue (veille, Wi-Fi coupé) : certaines opérations ne rappellent jamais ;
+      // on arrête la tâche tout de suite pour qu'elle passe en échec (et puisse être reprise).
+      const lost = new Promise((_, reject) => { onLost = () => { job.lost = true; job.cancel = true; reject(new Error('Connexion perdue')); }; s.conn.once('close', onLost); });
+      lost.catch(() => {});
+      await Promise.race([this.work(job, s), lost]);
       if (job.cancel) throw Object.assign(new Error('Annulé'), { cancelled: true });
       job.state = 'done';
     } catch (e) {
-      job.state = job.cancel ? 'cancelled' : 'error';
-      job.error = job.cancel ? null : (e.message || String(e));
+      job.state = job.cancel && !job.lost ? 'cancelled' : 'error';
+      job.error = job.state === 'cancelled' ? null : (e.message || String(e));
     } finally {
-      job.endedAt = Date.now(); job.current = '';
+      if (onLost && s && s.conn) s.conn.removeListener('close', onLost);
+      job.endedAt = Date.now(); job.current = ''; job.inflight.clear();
       if (job.channel) { try { job.channel.end(); } catch { /* ignore */ } job.channel = null; }
       this.push(job, true);
     }
+  }
+
+  async work(job, s) {
+    job.channel = await cb2p(cb => s.conn.sftp(cb));
+    const plan = job.dir === 'up' ? await this.planUp(job) : await this.planDown(job);
+    if (job.cancel) return;
+    job.filesTotal = plan.files.length;
+    job.bytesTotal = plan.files.reduce((a, f) => a + f.size, 0);
+    job.state = 'running'; job.copyStartedAt = Date.now();
+    this.push(job, true);
+    await this.ensureDirs(job, plan.dirs);
+    await pool(plan.files, PARALLEL, f => this.transferFile(job, f), () => job.cancel);
   }
 
   // ----- Plans : liste des dossiers à créer et des fichiers à copier -----
@@ -153,7 +166,7 @@ class SftpJobs {
   // Conflit sur l'élément de premier niveau : rename → « nom (1) », skip → null.
   async resolveName(job, target, side, isDir) {
     const exists = side === 'remote' ? await this.remoteExists(job, target) : fs.existsSync(target);
-    if (!exists || job.policy === 'overwrite') return target;
+    if (!exists || job.policy === 'overwrite' || job.policy === 'resume') return target;
     if (job.policy === 'skip' && !isDir) { job.skipped++; return null; }
     if (job.policy === 'skip' && isDir) return target; // fusion : les fichiers existants seront ignorés un par un
     const join = side === 'remote' ? P : path;
@@ -193,6 +206,11 @@ class SftpJobs {
 
   async transferFile(job, f) {
     job.current = job.dir === 'up' ? path.basename(f.from) : P.basename(f.from);
+    if (job.policy === 'resume') {
+      // Reprise après coupure : un fichier déjà complet n'est pas recopié ; un fichier partiel est refait.
+      const size = job.dir === 'up' ? await cb2p(cb => job.channel.stat(f.to, cb)).then(st => st.size, () => -1) : (fs.existsSync(f.to) ? fs.statSync(f.to).size : -1);
+      if (size === f.size) { job.skipped++; job.filesDone++; job.doneBytes += f.size; job.bytesDone = job.doneBytes; this.push(job); return; }
+    }
     if (job.policy === 'skip') {
       const exists = job.dir === 'up' ? await this.remoteExists(job, f.to) : fs.existsSync(f.to);
       if (exists) { job.skipped++; job.filesDone++; job.doneBytes += f.size; job.bytesDone = job.doneBytes; this.push(job); return; }

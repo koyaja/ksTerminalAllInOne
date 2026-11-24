@@ -25,7 +25,7 @@ const ARRAYS = ['hosts', 'keys', 'snippets', 'forwards', 'vpns', 'workspaces'];
 const MAPS = ['knownHosts', 'groupVpns'];
 const SYNCED_SETTINGS = ['theme', 'fontSize', 'tmuxPrefix', 'autoReconnect', 'dangerMode', 'auditEnabled', 'auditRetentionDays',
   'recordSessions', 'autoLockMinutes', 'lockOnSystemLock', 'ctrlFSearch', 'helloScreen',
-  'shellIntegration', 'notifyLongCommands', 'monitorInterval', 'monitorNotify'];
+  'shellIntegration', 'notifyLongCommands', 'monitorInterval', 'monitorNotify', 'keepAwakeTransfers'];
 
 // ----- Utilitaires -----
 function stable(v) {

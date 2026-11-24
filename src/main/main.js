@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen, powerMonitor, safeStorage, net, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, screen, powerMonitor, safeStorage, net, Notification, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -398,6 +398,7 @@ const peerService = new PeerService({
   audit: (type, who) => audit.log('settings', { action: { 'peer-paired': 'appareil appairé', 'peer-unpaired': 'appareil oublié', 'peer-sftp': 'fichiers ouverts par un appareil lié', 'peer-shell': 'terminal ouvert par un appareil lié', 'peer-attach': 'session rejointe par un appareil lié' }[type] || type, host: who }),
   isLocked: () => lock.locked,
   getSettings: () => appSettings(),
+  onActivity: (n) => keepAwake.set('peer-files', n > 0 && appSettings().keepAwakeTransfers !== false),
   deviceName: os.hostname().replace(/\.local$/i, ''), platform: process.platform, appVersion: app.getVersion(), userDataDir: app.getPath('userData'),
   spawnShell: (cols, rows) => {
     const sh = detectShells()[0];
@@ -797,7 +798,18 @@ handle('sftp:upload', (sessionId, localPath, remoteDir, transferId) =>
 handle('sftp:close', (sessionId) => { sftpJobs.cancelSession(sessionId); manager.close(sessionId); return true; });
 
 // ----- Transferts (file d'attente, dossiers, annulation) -----
-const sftpJobs = new SftpJobs({ manager, emit: (c, p) => { if (win && !win.isDestroyed()) win.webContents.send(c, p); } });
+// Pas de mise en veille pendant un transfert (ou quand un appareil lié copie des fichiers depuis ce PC).
+// L'écran peut s'éteindre ; seule la veille automatique du système est bloquée.
+const keepAwake = { reasons: new Set(), id: null,
+  set(reason, on) {
+    on ? this.reasons.add(reason) : this.reasons.delete(reason);
+    if (this.reasons.size && this.id === null) this.id = powerSaveBlocker.start('prevent-app-suspension');
+    else if (!this.reasons.size && this.id !== null) { powerSaveBlocker.stop(this.id); this.id = null; }
+  } };
+const sftpJobs = new SftpJobs({ manager, emit: (c, p) => {
+  if (win && !win.isDestroyed()) win.webContents.send(c, p);
+  keepAwake.set('transfers', sftpJobs.activeCount() > 0 && appSettings().keepAwakeTransfers !== false);
+} });
 handle('sftp:enqueue', (job) => sftpJobs.add(job || {}));
 handle('sftp:jobs', (sessionId) => sftpJobs.list(sessionId));
 handle('sftp:cancel', (id) => sftpJobs.cancel(id));
